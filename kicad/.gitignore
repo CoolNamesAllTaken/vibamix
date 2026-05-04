@@ -1,0 +1,12 @@
+**-backups**
+**.lck
+*/exports
+*/panelized
+*/plots
+**/#auto_saved_files#
+**/fp-info-cache
+**/.history
+**/.history_trim
+
+# Ignore transient user settings.
+**.kicad_prl
