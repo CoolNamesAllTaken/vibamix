@@ -91,7 +91,7 @@
         "items_not_allowed": "error",
         "length_out_of_range": "error",
         "lib_footprint_issues": "warning",
-        "lib_footprint_mismatch": "warning",
+        "lib_footprint_mismatch": "ignore",
         "malformed_courtyard": "error",
         "microvia_drill_out_of_range": "error",
         "mirrored_text_on_front_layer": "warning",
@@ -104,7 +104,7 @@
         "padstack": "warning",
         "pth_inside_courtyard": "error",
         "shorting_items": "error",
-        "silk_edge_clearance": "warning",
+        "silk_edge_clearance": "ignore",
         "silk_over_copper": "warning",
         "silk_overlap": "warning",
         "skew_out_of_range": "error",
@@ -628,14 +628,14 @@
         },
         {
           "group_by": false,
-          "label": "MPN",
-          "name": "MPN",
+          "label": "Manufacturer",
+          "name": "Manufacturer",
           "show": true
         },
         {
           "group_by": false,
-          "label": "Manufacturer",
-          "name": "Manufacturer",
+          "label": "MPN",
+          "name": "MPN",
           "show": true
         },
         {
@@ -684,6 +684,18 @@
           "group_by": false,
           "label": "Voltage",
           "name": "Voltage",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Capacitance",
+          "name": "Capacitance",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Temperature Coefficient",
+          "name": "Temperature Coefficient",
           "show": false
         }
       ],
@@ -751,7 +763,7 @@
         "uuid": "2a3c61d1-6d4e-41ef-afc9-76ec6805eac5"
       }
     ],
-    "used_designators": "#PWR1-14,D1-9,PCB1,T1-4,PART1,L1,R1-5,H1-2,GRAPHIC1,Q1-2,U1-2,C1-11,TP1-2,TP14,J1-4",
+    "used_designators": "#FLG1-3,FID1-6,#PWR1-17,D1-9,PCB1,T1-6,PART1,L1,R1-5,H1-2,GRAPHIC1-2,Q1-2,U1-2,C1-13,TP1-2,TP14,J1-5",
     "variants": []
   },
   "sheets": [
@@ -761,9 +773,9 @@
     ]
   ],
   "text_variables": {
-    "PCBA_PN": "PCBA_PN",
+    "PCBA_PN": "010260012",
     "PCBA_REV": "A",
-    "PCB_PN": "PCB_PN",
+    "PCB_PN": "010260011",
     "PCB_REV": "A",
     "PROJECT_NAME": "PROJECT_NAME"
   },

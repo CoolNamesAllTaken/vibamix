@@ -2,14 +2,11 @@
     "layout": {
         "hspace": "3mm",
         "vspace": "3mm",
-        "rotation": "270deg",
-        "alternation": "cols",
-        "rows": "2",
+        "rotation": "0deg",
+        "rows": "5",
         "cols": "2",
         "hbackbone": "5mm",
-        "vbackbone": "10mm",
-        "vbonecut": "False",
-        "hbonecut": "False"
+        "vbackbone": "5mm"
     },
     "tabs": {
         "type": "annotation"
@@ -18,7 +15,7 @@
         "type": "mousebites"
     },
     "framing": {
-        "type": "railstb",
+        "type": "frame",
         "width": "8mm",
         "cuts": "none"
     },
