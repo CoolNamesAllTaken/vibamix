@@ -1,0 +1,6 @@
+{
+    "nrf-connect.applications": [
+        "${workspaceFolder}/firmware/vibamix"
+    ],
+    "cmake.sourceDirectory": "/Users/jmcnelly/git-checkouts/vibamix/firmware/vibamix"
+}

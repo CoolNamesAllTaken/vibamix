@@ -1,0 +1,10 @@
+identifier: vibamix_xiao/nrf54l15/cpuapp
+name: Xiao NRF54L15 ePaper badge.
+vendor: pants_for_birds
+arch: arm
+toolchain:
+  - zephyr
+sysbuild: true
+ram: 188
+flash: 664
+supported: []

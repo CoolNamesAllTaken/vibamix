@@ -1,0 +1,121 @@
+/dts-v1/;
+
+#include <nordic/nrf54l15_cpuapp.dtsi>
+#include "vibamix_xiao-pinctrl.dtsi"
+#include <zephyr/dt-bindings/led/led.h>
+
+/ {
+	model = "Xiao NRF54L15 ePaper badge.";
+	compatible = "pants_for_birds,vibamix-xiao-cpuapp";
+
+	chosen {
+		zephyr,code-partition = &slot0_partition;
+		zephyr,sram = &cpuapp_sram;
+		zephyr,flash = &cpuapp_rram;
+		zephyr,flash-controller = &rram_controller;
+	};
+
+	/* LED strip power enable - active low */
+	leds {
+		compatible = "gpio-leds";
+		led_enable: led_enable {
+			gpios = <&gpio1 7 GPIO_ACTIVE_LOW>;	/* P1.07 LED_ENABLE */
+		};
+	};
+
+	aliases {
+		led-strip = &led_strip;
+		epaper    = &epaper;
+	};
+};
+
+/* ePaper display on SPI20 */
+&spi20 {
+	compatible = "nordic,nrf-spim";
+	status = "okay";
+	pinctrl-0 = <&spi20_default>;
+	pinctrl-1 = <&spi20_sleep>;
+	pinctrl-names = "default", "sleep";
+	cs-gpios = <&gpio2 7 GPIO_ACTIVE_LOW>;		/* P2.07 SCREEN_CS  */
+
+	epaper: epaper@0 {
+		compatible = "solomon,ssd1680";		/* update to match your controller */
+		reg = <0>;
+		spi-max-frequency = <4000000>;
+		width = <250>;
+		height = <122>;
+		dc-gpios   = <&gpio2 8 GPIO_ACTIVE_LOW>;	/* P2.08 SCREEN_D/C  */
+		reset-gpios = <&gpio2 9 GPIO_ACTIVE_LOW>;	/* P2.09 SCREEN_RES  */
+		busy-gpios  = <&gpio2 10 GPIO_ACTIVE_HIGH>;	/* P2.10 SCREEN_BUSY */
+	};
+};
+
+/* WS2812 LED strip on SPI21 - only MOSI (P1.06) is physically connected */
+&spi21 {
+	compatible = "nordic,nrf-spim";
+	status = "okay";
+	pinctrl-0 = <&spi21_default>;
+	pinctrl-1 = <&spi21_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	led_strip: ws2812@0 {
+		compatible = "worldsemi,ws2812-spi";
+		reg = <0>;
+		spi-max-frequency = <DT_FREQ_M(8)>;
+		chain-length = <1>;			/* update to your actual LED count */
+		color-mapping = <LED_COLOR_ID_GREEN
+				 LED_COLOR_ID_RED
+				 LED_COLOR_ID_BLUE>;
+		spi-one-frame  = <0x70>;
+		spi-zero-frame = <0x40>;
+	};
+};
+
+/* Light sensor I2C bus */
+&i2c20 {
+	compatible = "nordic,nrf-twim";
+	status = "okay";
+	pinctrl-0 = <&i2c20_default>;
+	pinctrl-1 = <&i2c20_sleep>;
+	pinctrl-names = "default", "sleep";
+	/* add sensor child node here once you know the I2C address and compatible */
+};
+
+&grtc {
+	owned-channels = <0 1 2 3 4 5 6 7 8 9 10 11>;
+	/* Channels 7-11 reserved for Zero Latency IRQs, 3-4 for FLPR */
+	child-owned-channels = <3 4 7 8 9 10 11>;
+	status = "okay";
+};
+
+&cpuapp_sram {
+	status = "okay";
+};
+
+&cpuapp_rram {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		boot_partition: partition@0 {
+			label = "mcuboot";
+			reg = <0x0 DT_SIZE_K(64)>;
+		};
+
+		slot0_partition: partition@10000 {
+			label = "image-0";
+			reg = <0x10000 DT_SIZE_K(664)>;
+		};
+
+		slot1_partition: partition@b6000 {
+			label = "image-1";
+			reg = <0xb6000 DT_SIZE_K(664)>;
+		};
+
+		storage_partition: partition@15c000 {
+			label = "storage";
+			reg = <0x15c000 DT_SIZE_K(36)>;
+		};
+	};
+};
