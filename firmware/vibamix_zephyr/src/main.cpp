@@ -11,6 +11,11 @@
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/conn.h>
 
+#include "Display_EPD_W21.h"
+#include "Display_EPD_W21_spi.h"
+#include "GUI_Paint.h"
+#include "fonts.h"
+
 #define DEVICE_NAME     CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
 
@@ -76,6 +81,18 @@ int main(void)
 	int err;
 
 	printk("Starting vibamix\n");
+
+	// ePaper hello world
+	static uint8_t epd_image[EPD_WIDTH * EPD_HEIGHT / 8];
+	EPD_GPIO_Init();
+	EPD_HW_Init();
+	Paint_NewImage(epd_image, EPD_WIDTH, EPD_HEIGHT, ROTATE_0, WHITE);
+	Paint_Clear(WHITE);
+	Paint_DrawString_EN(10, 10, "Hello World", &Font20, WHITE, BLACK);
+	EPD_Display(epd_image);
+	EPD_Update();
+	EPD_DeepSleep();
+	printk("ePaper hello world displayed\n");
 
 	if (!gpio_is_ready_dt(&user_led)) {
 		printk("LED device not ready\n");
