@@ -1,0 +1,22 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug vibamix",
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "external",
+            "gdbTarget": "localhost:1337",
+            "executable": "${workspaceFolder}/firmware/vibamix_zephyr/build/vibamix_zephyr/zephyr/zephyr.elf",
+            "preLaunchTask": "probe-rs GDB server",
+            "showDevDebugOutput": "none",
+            "overrideLaunchCommands": [
+                "set remote hardware-breakpoint-limit 8",
+                "load",
+                "monitor reset halt",
+                "hbreak main",
+                "continue"
+            ]
+        }
+    ]
+}

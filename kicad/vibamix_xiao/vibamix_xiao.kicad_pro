@@ -763,7 +763,7 @@
         "uuid": "2a3c61d1-6d4e-41ef-afc9-76ec6805eac5"
       }
     ],
-    "used_designators": "#FLG1-3,FID1-6,#PWR1-17,D1-9,PCB1,T1-6,PART1,L1,R1-5,H1-2,GRAPHIC1-2,Q1-2,U1-2,C1-13,TP1-2,TP14,J1-5",
+    "used_designators": "",
     "variants": []
   },
   "sheets": [

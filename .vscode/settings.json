@@ -1,6 +1,9 @@
 {
     "nrf-connect.applications": [
-        "${workspaceFolder}/firmware/vibamix"
+        "${workspaceFolder}/firmware/vibamix_zephyr"
     ],
-    "cmake.sourceDirectory": "/Users/jmcnelly/git-checkouts/vibamix/firmware/vibamix"
+    "nrf-connect.boardRoots": [
+        "${workspaceFolder}/firmware/vibamix_zephyr"
+    ],
+    "cmake.sourceDirectory": "${workspaceFolder}/firmware/vibamix_zephyr"
 }

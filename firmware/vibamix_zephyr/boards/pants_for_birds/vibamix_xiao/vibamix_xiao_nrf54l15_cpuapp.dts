@@ -13,20 +13,44 @@
 		zephyr,sram = &cpuapp_sram;
 		zephyr,flash = &cpuapp_rram;
 		zephyr,flash-controller = &rram_controller;
+		zephyr,console = &uart22;
 	};
 
 	/* LED strip power enable - active low */
 	leds {
 		compatible = "gpio-leds";
 		led_enable: led_enable {
-			gpios = <&gpio1 7 GPIO_ACTIVE_LOW>;	/* P1.07 LED_ENABLE */
+			gpios = <&gpio1 7 GPIO_ACTIVE_LOW>;    /* P1.07 LED_ENABLE */
+		};
+		user_led: user_led {
+			gpios = <&gpio2 0 GPIO_ACTIVE_LOW>;    /* P2.00 USER_LED  */
+		};
+	};
+
+	buttons {
+		compatible = "gpio-keys";
+		user_button: user_button {
+			/* External pullup — no GPIO_PULL_UP flag */
+			gpios = <&gpio0 0 GPIO_ACTIVE_LOW>;    /* P0.00 USER_KEY  */
 		};
 	};
 
 	aliases {
-		led-strip = &led_strip;
-		epaper    = &epaper;
+		led-strip   = &led_strip;
+		epaper      = &epaper;
+		user-led    = &user_led;
+		user-button = &user_button;
 	};
+};
+
+/* Logging UART */
+&uart22 {
+	compatible = "nordic,nrf-uarte";
+	status = "okay";
+	pinctrl-0 = <&uart22_default>;
+	pinctrl-1 = <&uart22_sleep>;
+	pinctrl-names = "default", "sleep";
+	current-speed = <115200>;
 };
 
 /* ePaper display on SPI20 */
@@ -36,17 +60,17 @@
 	pinctrl-0 = <&spi20_default>;
 	pinctrl-1 = <&spi20_sleep>;
 	pinctrl-names = "default", "sleep";
-	cs-gpios = <&gpio2 7 GPIO_ACTIVE_LOW>;		/* P2.07 SCREEN_CS  */
+	cs-gpios = <&gpio2 7 GPIO_ACTIVE_LOW>;        /* P2.07 SCREEN_CS  */
 
 	epaper: epaper@0 {
-		compatible = "solomon,ssd1680";		/* update to match your controller */
+		compatible = "pants-for-birds,epaper";
 		reg = <0>;
 		spi-max-frequency = <4000000>;
 		width = <250>;
 		height = <122>;
-		dc-gpios   = <&gpio2 8 GPIO_ACTIVE_LOW>;	/* P2.08 SCREEN_D/C  */
-		reset-gpios = <&gpio2 9 GPIO_ACTIVE_LOW>;	/* P2.09 SCREEN_RES  */
-		busy-gpios  = <&gpio2 10 GPIO_ACTIVE_HIGH>;	/* P2.10 SCREEN_BUSY */
+		dc-gpios = <&gpio2 8 GPIO_ACTIVE_LOW>;    /* P2.08 SCREEN_D/C  */
+		reset-gpios = <&gpio2 9 GPIO_ACTIVE_LOW>;    /* P2.09 SCREEN_RES  */
+		busy-gpios = <&gpio2 10 GPIO_ACTIVE_HIGH>;    /* P2.10 SCREEN_BUSY */
 	};
 };
 
@@ -62,11 +86,11 @@
 		compatible = "worldsemi,ws2812-spi";
 		reg = <0>;
 		spi-max-frequency = <DT_FREQ_M(8)>;
-		chain-length = <1>;			/* update to your actual LED count */
+		chain-length = <1>;            /* update to your actual LED count */
 		color-mapping = <LED_COLOR_ID_GREEN
-				 LED_COLOR_ID_RED
-				 LED_COLOR_ID_BLUE>;
-		spi-one-frame  = <0x70>;
+		LED_COLOR_ID_RED
+		LED_COLOR_ID_BLUE>;
+		spi-one-frame = <0x70>;
 		spi-zero-frame = <0x40>;
 	};
 };
@@ -79,6 +103,52 @@
 	pinctrl-1 = <&i2c20_sleep>;
 	pinctrl-names = "default", "sleep";
 	/* add sensor child node here once you know the I2C address and compatible */
+};
+
+&lfxo {
+	load-capacitors = "internal";
+	load-capacitance-femtofarad = <15000>;
+};
+
+&hfxo {
+	load-capacitors = "internal";
+	load-capacitance-femtofarad = <15000>;
+};
+
+&clock {
+	status = "okay";
+};
+
+&radio {
+	status = "okay";
+};
+
+&ieee802154 {
+	status = "okay";
+};
+
+&temp {
+	status = "okay";
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+&gpio1 {
+	status = "okay";
+};
+
+&gpio2 {
+	status = "okay";
+};
+
+&gpiote20 {
+	status = "okay";
+};
+
+&gpiote30 {
+	status = "okay";
 };
 
 &grtc {

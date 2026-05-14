@@ -1,0 +1,32 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "probe-rs GDB server",
+            "type": "shell",
+            "command": "${workspaceFolder}/firmware/vibamix_zephyr/boards/pants_for_birds/vibamix_xiao/support/probe-rs-wrapper",
+            "args": [
+                "gdb",
+                "--chip", "nRF54L15",
+                "--probe", "6F643EB8"
+            ],
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "probe-rs",
+                "pattern": [
+                    {
+                        "regexp": "^(\\S+):(\\d+):\\s+(.+)$",
+                        "file": 1,
+                        "line": 2,
+                        "message": 3
+                    }
+                ],
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "Firing up GDB stub",
+                    "endsPattern": "Firing up GDB stub"
+                }
+            }
+        }
+    ]
+}

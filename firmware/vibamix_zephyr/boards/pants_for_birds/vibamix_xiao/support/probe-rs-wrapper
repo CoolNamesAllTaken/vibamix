@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Wrapper for probe-rs: the nRF Connect VS Code extension passes --probe with
+# just a serial number, but probe-rs requires VID:PID:Serial format.
+# This script looks up the full selector from `probe-rs list` output.
+
+PROBE_RS_BIN="${PROBE_RS_BIN:-probe-rs}"
+
+fix_probe_serial() {
+    local serial="$1"
+    [[ "$serial" == *:* ]] && echo "$serial" && return
+    # probe-rs list line looks like: [N]: Name -- VID:PID-N:SERIAL (type)
+    local vid_pid
+    vid_pid=$("$PROBE_RS_BIN" list 2>/dev/null \
+        | grep -i "$serial" \
+        | grep -oE '[0-9a-fA-F]{4}:[0-9a-fA-F]{4}' \
+        | head -1)
+    [[ -n "$vid_pid" ]] && echo "${vid_pid}:${serial}" || echo "$serial"
+}
+
+new_args=()
+args=("$@")
+i=0
+while (( i < ${#args[@]} )); do
+    arg="${args[$i]}"
+    if [[ "$arg" == "--probe" ]]; then
+        (( i++ ))
+        new_args+=("--probe" "$(fix_probe_serial "${args[$i]}")")
+    else
+        new_args+=("$arg")
+    fi
+    (( i++ ))
+done
+
+exec "$PROBE_RS_BIN" "${new_args[@]}"
