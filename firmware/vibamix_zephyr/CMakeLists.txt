@@ -13,6 +13,8 @@ project(vibamix)
 # NORDIC SDK APP START
 target_sources(app PRIVATE
   src/main.cpp
+  src/GUI.cpp
+  src/BLERadio.cpp
 )
 
 add_subdirectory(../peripherals/epd epd)
