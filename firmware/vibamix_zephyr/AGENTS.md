@@ -49,6 +49,9 @@ App source:
 - [BLERadio.cpp](src/BLERadio.cpp) / [BLERadio.h](src/BLERadio.h) — BLE peripheral.
   File-scope `BT_CONN_CB_DEFINE` callbacks dispatch to a singleton instance; advertising
   auto-restarts on disconnect; the user LED is lit while connected.
+- [LEDStrip.cpp](src/LEDStrip.cpp) / [LEDStrip.h](src/LEDStrip.h) — drives the WS2812 chain.
+  Enables the `led_enable` power gate, then `main`'s run loop calls `render(phase)` to show
+  a rotating, dim rainbow (HSV→RGB; pixel count read from the DT `chain-length`).
 
 ## Build / flash / debug
 
@@ -86,8 +89,8 @@ cross-checked against the schematic in `kicad/vibamix_xiao/`.
 
 | Peripheral | Bus | Pins | Driver / compatible | Status |
 |-----------|-----|------|---------------------|--------|
-| ePaper display (250×122, GDEY027T91-class) | spi20 @ 4 MHz | SCK P2.01, MOSI P2.02 (no MISO), CS P2.07, D/C P2.08, RST P2.09, BUSY P2.10 | `pants-for-birds,epaper` (custom) | working |
-| WS2812B RGB LED | spi21 | DIN P1.06 (MOSI only; SCK P1.05 is NC) | `worldsemi,ws2812-spi`, `chain-length=1` | working |
+| ePaper display (GDEY027T91, 176×264) | spi20 @ 4 MHz | SCK P2.01, MOSI P2.02 (no MISO), CS P2.07, D/C P2.08, RST P2.09, BUSY P2.10 | `pants-for-birds,epaper` (custom) | working |
+| WS2812B RGB LEDs (D4–D7, 4-LED chain) | spi21 | DIN P1.06 (MOSI only; SCK P1.05 is NC) | `worldsemi,ws2812-spi`, `chain-length=4` | driven (rainbow) |
 | LED power gate | GPIO | `led_enable` P1.07, active-low (drives a PMOS) | `gpio-leds` | working |
 | Ambient light sensor (LTR-329ALS-01) | i2c20 | SDA P1.10, SCL P1.11 | — | **bus enabled, sensor node TODO** |
 | User LED | GPIO | P2.00, active-low — alias `user-led` | `gpio-leds` | working |
@@ -119,7 +122,8 @@ management, and the GRTC syscounter.
   button ISR currently only prints.
 - The **light sensor is not yet driven** — the i2c20 bus is up but the child node/driver is
   a TODO in the DTS.
-- `chain-length=1` for the WS2812 strip is a placeholder; update it to the real LED count.
+- The WS2812 chain is **4 LEDs** (D4–D7); the strip is power-gated by `led_enable` (P1.07) —
+  that gate **must be driven active** (done in `LEDStrip::init`) or the LEDs have no VDD.
 - The ePaper SPI driver gracefully stubs out when the `epaper` DT node is absent (see
   [Display_EPD_W21_spi.cpp](../peripherals/epd/epaper_display/Display_EPD_W21_spi.cpp)).
 
@@ -129,6 +133,7 @@ management, and the GRTC syscounter.
   `boards/pants_for_birds/vibamix_xiao/`.
 - **ePaper low-level / drawing primitives** → `../peripherals/epd/` (**not** `src/`).
 - **App-level display content** → [GUI.cpp](src/GUI.cpp).
+- **LED strip behavior** (colors, animation, brightness) → [LEDStrip.cpp](src/LEDStrip.cpp).
 - **BLE behavior** (name, advertising, connection handling) → [BLERadio.cpp](src/BLERadio.cpp)
   and `CONFIG_BT_*` in [prj.conf](prj.conf).
 - **Add the light sensor** → add a child node under `&i2c20` in the DTS with the right

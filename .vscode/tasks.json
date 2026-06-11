@@ -7,8 +7,9 @@
             "command": "${workspaceFolder}/firmware/vibamix_zephyr/boards/pants_for_birds/vibamix_xiao/support/probe-rs-wrapper",
             "args": [
                 "gdb",
-                "--chip", "nRF54L15",
-                "--probe", "6F643EB8"
+                "--chip",
+                "nRF54L15",
+                // "--probe", "6F643EB8"
             ],
             "isBackground": true,
             "problemMatcher": {

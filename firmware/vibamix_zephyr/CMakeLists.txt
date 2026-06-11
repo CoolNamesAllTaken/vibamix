@@ -15,6 +15,7 @@ target_sources(app PRIVATE
   src/main.cpp
   src/GUI.cpp
   src/BLERadio.cpp
+  src/LEDStrip.cpp
 )
 
 add_subdirectory(../peripherals/epd epd)

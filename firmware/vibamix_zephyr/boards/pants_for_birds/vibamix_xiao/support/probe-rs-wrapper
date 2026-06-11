@@ -19,16 +19,37 @@ fix_probe_serial() {
 
 new_args=()
 args=("$@")
+is_gdb=0
+gdb_port=1337
 i=0
 while (( i < ${#args[@]} )); do
     arg="${args[$i]}"
     if [[ "$arg" == "--probe" ]]; then
         (( i++ ))
         new_args+=("--probe" "$(fix_probe_serial "${args[$i]}")")
+    elif [[ "$arg" == "gdb" ]]; then
+        is_gdb=1
+        new_args+=("$arg")
+    elif [[ "$arg" == "--gdb-connection-string" ]]; then
+        new_args+=("$arg")
+        (( i++ ))
+        # host:port — grab the trailing port so detection matches an overridden port.
+        gdb_port="${args[$i]##*:}"
+        new_args+=("${args[$i]}")
     else
         new_args+=("$arg")
     fi
     (( i++ ))
 done
+
+# Idempotent gdb launch: if a probe-rs gdb server is already listening on the target
+# port (e.g. left running after a debug-session restart), don't try to spawn a second
+# one — it would fail to bind the port and hang VS Code's preLaunchTask. Emit the
+# sentinel the tasks.json problemMatcher waits for and exit so cortex-debug attaches to
+# the existing server.
+if (( is_gdb )) && nc -z 127.0.0.1 "$gdb_port" 2>/dev/null; then
+    echo "Firing up GDB stub"
+    exit 0
+fi
 
 exec "$PROBE_RS_BIN" "${new_args[@]}"

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg width="100%" height="100%" viewBox="0 0 638 284" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:1.5;">
+    <g transform="matrix(1,0,0,1,-1370.08,0)">
+        <g id="whale" transform="matrix(0.710526,0,0,0.5,1386.86,-295.276)">
+            <rect x="-23.622" y="590.551" width="897.638" height="566.929" style="fill:none;"/>
+            <clipPath id="_clip1">
+                <rect x="-23.622" y="590.551" width="897.638" height="566.929"/>
+            </clipPath>
+            <g clip-path="url(#_clip1)">
+                <g transform="matrix(1.40741,0,0,2,-1951.88,590.551)">
+                    <path d="M1629.92,221.202C1580.66,246.379 1535.7,272.018 1497.97,273.778C1453.19,275.865 1410.9,280.982 1378.06,283.465" style="fill:none;stroke:black;stroke-width:12.5px;"/>
+                </g>
+                <g transform="matrix(1.40741,0,0,2,-1951.88,590.551)">
+                    <path d="M1644,179.372C1637.75,189.648 1631.07,200.625 1629.92,212.598C1629.12,220.943 1633.56,229.484 1638.55,236.22C1643.77,243.269 1655.76,244.334 1659.36,252.333C1669.2,274.215 1667.32,300.192 1677.16,322.074L1688.98,324.706C1691.45,301.194 1711.95,289.381 1712.6,265.748C1713.18,244.697 1715.56,250.43 1706.96,221.202C1702.03,204.474 1679.26,180.842 1688.98,169.741" style="fill:none;stroke:black;stroke-width:12.5px;"/>
+                </g>
+                <g transform="matrix(1.40741,0,0,2,-1951.88,590.551)">
+                    <path d="M1700.79,188.976C1716.65,180.044 1732.51,171.108 1748.03,161.6C1764.02,151.808 1781.81,144.133 1795.28,131.093C1821.57,105.638 1905.05,47.394 1883.05,32.922C1840.07,4.652 1716.94,19.313 1671.58,32.776C1641.82,41.612 1611.73,49.568 1582.68,60.521C1550.5,72.654 1519.59,87.909 1488.19,101.93C1478.4,106.303 1353.64,168.547 1358.27,177.165" style="fill:none;stroke:black;stroke-width:12.5px;"/>
+                </g>
+                <g transform="matrix(1.52895,0,0,2.17272,-1208.89,353.339)">
+                    <circle cx="1101.38" cy="245.079" r="8.858"/>
+                </g>
+            </g>
+        </g>
+    </g>
+</svg>

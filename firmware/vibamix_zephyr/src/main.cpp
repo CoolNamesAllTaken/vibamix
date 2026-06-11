@@ -10,6 +10,7 @@
 
 #include "GUI.h"
 #include "BLERadio.h"
+#include "LEDStrip.h"
 
 static const struct gpio_dt_spec user_led = GPIO_DT_SPEC_GET(DT_ALIAS(user_led), gpios);
 static const struct gpio_dt_spec user_btn = GPIO_DT_SPEC_GET(DT_ALIAS(user_button), gpios);
@@ -19,6 +20,7 @@ static struct gpio_callback btn_cb_data;
 // Static globals keep the 5808-byte image buffer in .bss, not the main stack.
 static GUI      s_gui;
 static BLERadio s_ble;
+static LEDStrip s_leds;
 
 static void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
@@ -56,8 +58,20 @@ int main(void)
 	}
 	s_ble.start_advertising();
 
+	if (s_leds.init() != 0)
+	{
+		// No LED strip — keep the rest of the firmware running.
+		for (;;)
+		{
+			k_sleep(K_FOREVER);
+		}
+	}
+
+	uint32_t phase = 0;
 	for (;;)
 	{
-		k_sleep(K_FOREVER);
+		s_leds.render(phase);
+		phase = (phase + 4) % 360;    // rotation speed
+		k_sleep(K_MSEC(40));          // ~25 fps
 	}
 }

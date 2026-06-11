@@ -66,8 +66,8 @@
 		compatible = "pants-for-birds,epaper";
 		reg = <0>;
 		spi-max-frequency = <4000000>;
-		width = <250>;
-		height = <122>;
+		width = <176>;
+		height = <264>;
 		dc-gpios = <&gpio2 8 GPIO_ACTIVE_LOW>;    /* P2.08 SCREEN_D/C  */
 		reset-gpios = <&gpio2 9 GPIO_ACTIVE_LOW>;    /* P2.09 SCREEN_RES  */
 		busy-gpios = <&gpio2 10 GPIO_ACTIVE_HIGH>;    /* P2.10 SCREEN_BUSY */
@@ -86,7 +86,7 @@
 		compatible = "worldsemi,ws2812-spi";
 		reg = <0>;
 		spi-max-frequency = <DT_FREQ_M(8)>;
-		chain-length = <1>;            /* update to your actual LED count */
+		chain-length = <4>;            /* D4-D7 WS2812B chain */
 		color-mapping = <LED_COLOR_ID_GREEN
 		LED_COLOR_ID_RED
 		LED_COLOR_ID_BLUE>;
