@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import FreeSimpleGUI as sg
 
-from . import calibrate, config
+from . import config
 from .controller import (
     Controller,
     EVT_ALL_DONE,
+    EVT_BUILD_DONE,
+    EVT_BUILD_LINE,
     EVT_DEVICE_DONE,
     EVT_HOTPLUG,
     EVT_PROGRESS,
@@ -63,7 +65,7 @@ def _slot_elements(slot: Slot) -> list:
     ]
 
 
-def build_window(slots: list[Slot], num_hubs: int) -> sg.Window:
+def build_window(slots: list[Slot], num_hubs: int, firmware: str | None = None) -> sg.Window:
     """Build a window sized to the current hub/slot count, bounded by screen width."""
     screen_w, screen_h = _get_screen_size()
     names, _ = _bench_config_options()
@@ -71,15 +73,19 @@ def build_window(slots: list[Slot], num_hubs: int) -> sg.Window:
     slots_per_hub = len(slots) // num_hubs if num_hubs else len(slots)
     cols_per_hub = max(1, slots_per_hub // _ROWS)
 
+    fw_label = firmware.split("/")[-1] if firmware else "—"
+    fw_color = "white" if firmware else "gray"
+
     toolbar = [
         sg.Combo(names, default_value=current, key="-CONFIG-",
                  enable_events=True, readonly=True, size=(20, 1)),
         sg.Text(f"Hubs: {num_hubs}", key="-HUB-COUNT-", pad=((10, 4), 0)),
-        sg.Button("Discover", size=(9, 1), pad=((10, 4), 0)),
-        sg.Button("Flash All", size=(9, 1), disabled=True),
+        sg.Button("Build", size=(7, 1), pad=((10, 4), 0)),
+        sg.Button("Flash All", size=(9, 1), pad=((4, 4), 0), disabled=firmware is None),
         sg.Text("firmware:", pad=((12, 4), 0)),
-        sg.Text("—", key="-FW-", size=(24, 1), text_color="gray",
+        sg.Text(fw_label, key="-FW-", size=(30, 1), text_color=fw_color,
                 font=("Courier", 9)),
+        sg.Button("Browse…", size=(8, 1), pad=((4, 4), 0)),
     ]
 
     rows = []
@@ -112,8 +118,18 @@ def update_slot(window, slot: Slot) -> None:
     window[f"-SER-{slot.index}-"].update(serial)
 
 
+def _set_firmware(window, ctrl: Controller, path: str) -> None:
+    """Update controller + toolbar label with a new firmware path."""
+    ctrl.firmware = path
+    label = path.split("/")[-1] if path else "—"
+    window["-FW-"].update(label, text_color="white")
+    window["Flash All"].update(disabled=False)
+
+
 def _event_loop(window: sg.Window, ctrl: Controller) -> str:
     """Run the event loop. Returns ``"rebuild"`` or ``"exit"``."""
+    _build_log: list[str] = []  # accumulates west build output for error reporting
+
     while True:
         event, values = window.read(timeout=200)
 
@@ -130,23 +146,37 @@ def _event_loop(window: sg.Window, ctrl: Controller) -> str:
                 ctrl.load_config(path)
                 return "rebuild"
 
-        elif event == "Discover":
-            def _prompt(msg):
-                sg.popup_ok(msg, title="Discover hub")
+        elif event == "Build":
+            _build_log.clear()
+            window["Build"].update(disabled=True)
+            window["-FW-"].update("building…", text_color="gray")
+            ctrl.build(window)
 
-            slot_map = calibrate.run_slot_calibration(prompt_fn=_prompt)
-            if slot_map:
-                relative_map = calibrate.abs_to_relative(slot_map)
-                name = sg.popup_get_text("Save config as (e.g. my_hub):",
-                                         title="Save calibration")
-                if name and name.strip():
-                    dest = config._CONFIG_DIR / f"bench_{name.strip()}.json"
-                    calibrate.write_bench_config(relative_map, dest)
-                ctrl._relative_map = relative_map
-            return "rebuild"
+        elif event == EVT_BUILD_LINE:
+            _build_log.append(values[event])
+
+        elif event == EVT_BUILD_DONE:
+            ok, hex_path = values[event]
+            window["Build"].update(disabled=False)
+            if ok and hex_path:
+                _set_firmware(window, ctrl, hex_path)
+            else:
+                window["-FW-"].update("build failed", text_color="#ff3333")
+                tail = "".join(_build_log[-30:])
+                sg.popup_scrolled(tail, title="Build output", size=(80, 24))
+
+        elif event == "Browse…":
+            path = sg.popup_get_file(
+                "Select firmware hex",
+                file_types=(("Hex files", "*.hex"), ("All files", "*.*")),
+                no_window=True,
+            )
+            if path:
+                _set_firmware(window, ctrl, path)
 
         elif event == "Flash All":
-            sg.popup("Flash All not yet implemented.")
+            window["Flash All"].update(disabled=True)
+            ctrl.flash_all(window)
 
         elif event == EVT_HOTPLUG:
             for slot in values[event]:
@@ -154,29 +184,44 @@ def _event_loop(window: sg.Window, ctrl: Controller) -> str:
 
         elif event == EVT_PROGRESS:
             idx, pct, msg = values[event]
-            pass
+            update_slot(window, ctrl.slots[idx])
 
         elif event == EVT_DEVICE_DONE:
             idx, ok, msg = values[event]
-            slot = ctrl.slots[idx]
-            update_slot(window, slot)
+            update_slot(window, ctrl.slots[idx])
 
         elif event == EVT_ALL_DONE:
             summary = values[event]
-            sg.popup(f"Done.  {summary}")
+            if "error" in summary and isinstance(summary["error"], str):
+                sg.popup_error(summary["error"], title="Flash error")
+            else:
+                done, err = summary.get("done", 0), summary.get("error", 0)
+                sg.popup(f"Done: {done}   Errors: {err}", title="Flash complete")
             window["Flash All"].update(disabled=False)
 
 
 def run() -> None:
     ctrl = Controller()
 
+    # Pre-populate firmware from the default build location if it already exists.
+    try:
+        ctrl.firmware = ctrl.resolve_firmware()
+    except FileNotFoundError:
+        pass
+
+    slots = ctrl.discover()
+    window = build_window(slots, ctrl.num_hubs, ctrl.firmware)
+    ctrl.start_hotplug_monitor(window, interval=0.5)
+
     while True:
-        slots = ctrl.discover()
-        window = build_window(slots, ctrl.num_hubs)
-        ctrl.start_hotplug_monitor(window, interval=0.5)
-
         action = _event_loop(window, ctrl)
-        window.close()
-
         if action == "exit":
+            window.close()
             break
+        # Rebuild: open the new window before closing the old one so there is
+        # no blank-screen moment that looks like a crash.
+        old_window = window
+        slots = ctrl.discover()
+        window = build_window(slots, ctrl.num_hubs, ctrl.firmware)
+        ctrl.start_hotplug_monitor(window, interval=0.5)
+        old_window.close()

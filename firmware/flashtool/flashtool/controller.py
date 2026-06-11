@@ -11,15 +11,17 @@ import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-from . import config, flasher, usb_topology
-from .models import Slot
+from . import builder, config, flasher, usb_topology
+from .models import Slot, Status
 
 # Event keys posted to the GUI event loop.
 EVT_PROGRESS    = "-DEV-PROGRESS-"  # value = (slot_index, pct, message)
 EVT_DEVICE_DONE = "-DEV-DONE-"      # value = (slot_index, ok, message)
-EVT_ALL_DONE    = "-ALL-DONE-"      # value = summary dict
+EVT_ALL_DONE    = "-ALL-DONE-"      # value = {"done": int, "error": int, "absent": int}
 EVT_HOTPLUG     = "-HOTPLUG-"       # value = list[Slot] — devices changed within same hub topology
 EVT_REBUILD     = "-REBUILD-"       # value = list[Slot] — hub count/roots changed, window must rebuild
+EVT_BUILD_LINE  = "-BUILD-LINE-"    # value = str — one line of west build output
+EVT_BUILD_DONE  = "-BUILD-DONE-"    # value = (ok: bool, hex_path: str | None)
 
 
 class Controller:
@@ -29,6 +31,7 @@ class Controller:
         self.slots: list[Slot] = []
         self._relative_map: dict[int, str] | None = config.RELATIVE_MAP
         self._hub_roots: list[str] = []
+        self.firmware: str | None = None  # path to the hex to flash; set by build or browse
 
     @property
     def num_hubs(self) -> int:
@@ -67,46 +70,102 @@ class Controller:
         return self.slots
 
     def resolve_firmware(self) -> str:
-        """Pick the firmware image from config.ARTIFACT_DIR (newest glob match)."""
-        # pseudocode:
-        #   matches = sorted(config.ARTIFACT_DIR.glob(config.FIRMWARE_GLOB),
-        #                    key=lambda p: p.stat().st_mtime)
-        #   if not matches: raise FileNotFoundError(...)
-        #   return str(matches[-1])
-        raise NotImplementedError
+        """Return the firmware path to flash.
+
+        Uses ``self.firmware`` if set (by a build or Browse), otherwise falls
+        back to the newest hex found in ``config.ARTIFACT_DIR``.
+        """
+        if self.firmware:
+            return self.firmware
+        matches = sorted(
+            config.ARTIFACT_DIR.glob(config.FIRMWARE_GLOB),
+            key=lambda p: p.stat().st_mtime,
+        )
+        if not matches:
+            raise FileNotFoundError(
+                f"No firmware found in {config.ARTIFACT_DIR} "
+                f"matching {config.FIRMWARE_GLOB!r} — build first or click Browse"
+            )
+        return str(matches[-1])
 
     def flash_all(self, window) -> None:
-        """Kick off flashing every present slot WITHOUT blocking the GUI."""
-        # pseudocode:
-        #   firmware = self.resolve_firmware()
-        #   threading.Thread(target=self._run_pool, args=(window, firmware),
-        #                    daemon=True).start()
-        raise NotImplementedError
+        """Kick off flashing every present slot without blocking the GUI."""
+        try:
+            firmware = self.resolve_firmware()
+        except FileNotFoundError as exc:
+            window.write_event_value(EVT_ALL_DONE, {"error": str(exc)})
+            return
+        present = [s for s in self.slots if s.device is not None]
+        if not present:
+            return
+        for s in present:
+            s.status = Status.FLASHING
+        window.write_event_value(EVT_HOTPLUG, list(self.slots))
+        threading.Thread(
+            target=self._run_pool,
+            args=(window, firmware, present),
+            daemon=True,
+        ).start()
 
-    def _run_pool(self, window, firmware: str) -> None:
-        """Dispatcher thread: fan out one worker per present slot, bounded pool."""
-        # pseudocode:
-        #   present = [s for s in self.slots if s.device is not None]
-        #   with ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT) as ex:
-        #       futures = [ex.submit(self._flash_one, window, s, firmware)
-        #                  for s in present]
-        #       wait(futures)
-        #   window.write_event_value(EVT_ALL_DONE, self._summary())
-        raise NotImplementedError
+    def _run_pool(self, window, firmware: str, present: list[Slot]) -> None:
+        """Dispatcher thread: fan out one worker per slot, bounded pool."""
+        with ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT) as ex:
+            futures = [ex.submit(self._flash_one, window, s, firmware) for s in present]
+            for f in futures:
+                try:
+                    f.result()
+                except Exception:
+                    pass
+        try:
+            window.write_event_value(EVT_ALL_DONE, self._summary())
+        except Exception:
+            pass
 
     def _flash_one(self, window, slot: Slot, firmware: str) -> None:
-        """Worker: flash a single slot, streaming progress as GUI events."""
-        # pseudocode:
-        #   def cb(pct, msg):
-        #       window.write_event_value(EVT_PROGRESS, (slot.index, pct, msg))
-        #   ok, msg = flasher.flash_device(slot.device, firmware, cb)
-        #   window.write_event_value(EVT_DEVICE_DONE, (slot.index, ok, msg))
-        raise NotImplementedError
+        """Worker: flash one slot, streaming progress back as GUI events."""
+        def cb(pct: float, msg: str) -> None:
+            slot.progress = pct
+            slot.message = msg
+            if "verify" in msg:
+                slot.status = Status.VERIFYING
+            try:
+                window.write_event_value(EVT_PROGRESS, (slot.index, pct, msg))
+            except Exception:
+                pass
+
+        ok, msg = flasher.flash_device(slot.device, firmware, cb)
+        slot.status = Status.DONE if ok else Status.ERROR
+        slot.message = msg
+        try:
+            window.write_event_value(EVT_DEVICE_DONE, (slot.index, ok, msg))
+        except Exception:
+            pass
 
     def _summary(self) -> dict:
-        """Aggregate per-slot results into a final summary for EVT_ALL_DONE."""
-        # pseudocode: count DONE vs ERROR vs ABSENT across self.slots
-        raise NotImplementedError
+        done   = sum(1 for s in self.slots if s.status is Status.DONE)
+        error  = sum(1 for s in self.slots if s.status is Status.ERROR)
+        absent = sum(1 for s in self.slots if s.status is Status.ABSENT)
+        return {"done": done, "error": error, "absent": absent}
+
+    def build(self, window) -> None:
+        """Run ``west build`` in a background thread, streaming output as events."""
+        def _run():
+            def emit(line: str) -> None:
+                try:
+                    window.write_event_value(EVT_BUILD_LINE, line)
+                except Exception:
+                    pass
+
+            ok = builder.build(on_output=emit)
+            hex_path = str(builder.firmware_hex()) if ok else None
+            if ok and hex_path:
+                self.firmware = hex_path
+            try:
+                window.write_event_value(EVT_BUILD_DONE, (ok, hex_path))
+            except Exception:
+                pass
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def start_hotplug_monitor(self, window, interval: float = 1.5) -> None:
         """Start a daemon thread that polls for USB changes and posts events.

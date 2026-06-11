@@ -23,7 +23,36 @@ pip install poetry       # if not already installed
 poetry install
 ```
 
-### 3. Calibrate your hub (once per hub model)
+### 3. Install probe-rs
+
+probe-rs is the flashing backend. Install the pre-built binary (fastest):
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/probe-rs/probe-rs/releases/latest/download/probe-rs-tools-installer.sh \
+  | sh
+```
+
+Or via cargo:
+
+```bash
+cargo install probe-rs-tools
+```
+
+### 4. Add udev rule (Linux only)
+
+Without this, probe-rs can't open the USB device as a non-root user.
+
+```bash
+sudo tee /etc/udev/rules.d/99-vibamix.rules <<'EOF'
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2886", ATTRS{idProduct}=="0066", MODE="0666", GROUP="plugdev"
+EOF
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+Unplug and replug any connected boards after applying the rule.
+
+### 5. Calibrate your hub (once per hub model)
 
 Calibration maps each physical port on the hub to a slot number. You only need
 to do this once per hub **model** — the same config file works on every machine
@@ -53,7 +82,7 @@ The result is a **relative** port map (hub-root stripped) stored in
 `flashtool/usb_hubs/`. It is committed to the repo so every team member can use
 it without re-calibrating.
 
-### 4. Run
+### 6. Run
 
 ```bash
 poetry run python -m flashtool
@@ -73,10 +102,19 @@ hub model. If you have multiple identical hubs, the app detects all instances
 automatically and shows them as separate column groups. New hubs can be plugged
 in while the app is running — the layout expands automatically.
 
-### Flashing
+### Building and flashing
 
-Select a firmware file and click **Flash All**. Every slot that has a board
-present will be flashed in parallel. Status per slot:
+On startup the app looks for a pre-built hex at the default west build output
+path (`firmware/vibamix_zephyr/build/vibamix_zephyr/zephyr/zephyr.hex`). If
+found, **Flash All** is enabled immediately.
+
+To build from source, click **Build** (requires NCS v3.3.1 installed at
+`~/ncs/v3.3.1`). The build runs in the background and automatically loads the
+resulting hex when done.
+
+To flash a pre-built hex from elsewhere, click **Browse…** and select the file.
+
+Click **Flash All** to flash every present board in parallel. Status per slot:
 
 | Status | Meaning |
 |--------|---------|
@@ -148,17 +186,6 @@ probe-rs list     # cross-platform
 ```
 
 The Seeed XIAO nRF54L15 CMSIS-DAP probe is `0x2886:0x0066` (default).
-
-On Linux you may also need a udev rule to allow non-root USB access:
-
-```
-# /etc/udev/rules.d/99-vibamix.rules
-SUBSYSTEM=="usb", ATTRS{idVendor}=="2886", ATTRS{idProduct}=="0066", MODE="0666"
-```
-
-```bash
-sudo udevadm control --reload-rules && sudo udevadm trigger
-```
 
 **Boards appear on the wrong slots**
 

@@ -9,14 +9,55 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+# --- NCS / west build --------------------------------------------------------
+# Root of the nRF Connect SDK installation.  The toolchain subdirectory is
+# resolved automatically from toolchains.json; override NCS_TOOLCHAIN_DIR if
+# the auto-detection ever breaks.
+NCS_BASE: Path = Path.home() / "ncs"
+NCS_VERSION: str = "v3.3.1"
+NCS_DIR: Path = NCS_BASE / NCS_VERSION
+
+# Zephyr app source and default build output directory.
+WEST_APP_DIR: Path = Path(__file__).parent.parent.parent / "vibamix_zephyr"
+BOARD: str = "vibamix_xiao/nrf54l15/cpuapp"
+BUILD_DIR: Path = WEST_APP_DIR / "build"
+
+# Resolved at import time from toolchains.json; falls back to the first
+# toolchain dir found under NCS_BASE/toolchains/.
+def _find_toolchain_dir() -> Path:
+    tj = NCS_BASE / "toolchains" / "toolchains.json"
+    if tj.exists():
+        data = json.loads(tj.read_text())
+        # toolchains.json may be a list of objects or a single object.
+        items = data if isinstance(data, list) else [data]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for entry in item.get("toolchains", []):
+                if NCS_VERSION in entry.get("ncs_versions", []):
+                    bid = entry["identifier"]["bundle_id"]
+                    return NCS_BASE / "toolchains" / bid
+    # fallback: pick the most recently modified toolchain directory
+    tc_dir = NCS_BASE / "toolchains"
+    candidates = [d for d in tc_dir.iterdir() if d.is_dir()] if tc_dir.exists() else []
+    return max(candidates, key=lambda d: d.stat().st_mtime) if candidates \
+        else NCS_BASE / "toolchains" / "unknown"
+
+NCS_TOOLCHAIN_DIR: Path = _find_toolchain_dir()
+
 # --- Firmware artifacts ------------------------------------------------------
-ARTIFACT_DIR: Path = Path("/opt/vibamix/firmware")
-FIRMWARE_GLOB: str = "*.hex"
+# Hex produced by ``west build``.  Override if you flash pre-built artifacts
+# from a different location.
+ARTIFACT_DIR: Path = BUILD_DIR / "vibamix_zephyr" / "zephyr"
+FIRMWARE_GLOB: str = "zephyr.hex"
 CHIP: str = "nRF54L15"
 
 # --- Flashing backend (probe-rs over the XIAO onboard CMSIS-DAP) -------------
+# probe-rs must be installed separately (e.g. via `cargo install probe-rs-tools`
+# or a pre-built binary on PATH).  Set PROBE_RS_BIN to an absolute path if it
+# is not on PATH.
 PROBE_RS_BIN: str = "probe-rs"
-PROBE_RS_WRAPPER: str | None = None
+PROBE_RS_WRAPPER: str | None = None   # set to wrapper script path if needed
 FLASH_TIMEOUT_S: int = 120
 
 # --- Concurrency -------------------------------------------------------------

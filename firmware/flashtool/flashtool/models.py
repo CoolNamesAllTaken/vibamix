@@ -28,8 +28,9 @@ class UsbDevice:
     product: str | None = None
 
     def selector(self) -> str:
-        """Return the probe-rs ``--probe`` selector ``"VID:PID:Serial"``."""
-        return f"{self.vid:04x}:{self.pid:04x}:{self.serial}"
+        """Return the probe-rs ``--probe`` selector ``"VID:PID"`` or ``"VID:PID:Serial"``."""
+        base = f"{self.vid:04x}:{self.pid:04x}"
+        return f"{base}:{self.serial}" if self.serial else base
 
 
 @dataclass
