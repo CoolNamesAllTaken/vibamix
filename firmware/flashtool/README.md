@@ -1,169 +1,190 @@
 # flashtool
 
-A desktop app for flashing a pre-built firmware image onto every device plugged
-into a USB hub, concurrently, with a live per-device status UI.
+Desktop app for flashing a firmware image onto every vibamix board plugged into
+one or more USB hubs at once, with a live per-slot status display.
 
-## What it does
+## Quick start
 
-- Enumerates every vibamix programmer on one USB hub.
-- Binds each **physical hub port** to a fixed **slot number** in the UI, shown
-  as a 2×10 grid matching the hub's physical layout.
-- Flashes a pre-built artifact (from a static directory) to all present devices
-  at once, each in its own worker thread.
-- Shows live status per slot (absent / ready / flashing / done / error).
-
-## Design notes
-
-### Determinism: ports, not serials
-
-Slots are keyed on **USB topology** — the bus number plus the chain of port
-numbers from the root hub (e.g. `"1-2.1.3"`). That path belongs to the physical
-socket, so the same port always maps to the same slot regardless of which board
-is seated or what order devices enumerate at power-on.
-
-pyusb (libusb) exposes this cross-platform via `device.bus` and
-`device.port_numbers`. A serial number is used only as the probe-rs `--probe`
-selector *after* a device has been bound to its slot by port.
-
-### Explicit slot map
-
-Large hubs often have multiple internal controllers, so USB paths don't follow
-a simple `prefix.1`…`prefix.20` sequence. The tool instead builds an explicit
-`slot_map` (stored in `bench.json`) by asking you to unplug and replug the hub
-with all boards seated. Detected paths are sorted numerically — which matches
-physical port order for common hub designs — and assigned slots 0–19.
-
-The map lives in `bench.json` (gitignored, machine-specific). Re-run
-calibration if the hub is moved to a different USB port on the laptop.
-
-### Flashing backend
-
-`flasher.py` shells out to **probe-rs** over each board's onboard CMSIS-DAP.
-The backend is isolated behind one function so it can be swapped for nrfutil /
-J-Link later.
-
-### Concurrency
-
-The GUI runs on the main thread. `Flash All` spawns a dispatcher thread that
-fans work out to a `ThreadPoolExecutor` (`config.MAX_CONCURRENT`). Workers
-report progress by posting events back to the GUI via
-`window.write_event_value` (thread-safe in FreeSimpleGUI).
-
-## Layout
-
-```
-flashtool/
-  config.py         # bench setup: artifact dir, chip, VID/PID, slot limits
-  models.py         # UsbDevice, Slot, Status
-  usb_topology.py   # enumerate hub, bind ports to slots, sort helpers
-  flasher.py        # probe-rs backend: flash one device + parse progress
-  controller.py     # discovery + concurrent dispatch (no GUI deps)
-  gui.py            # FreeSimpleGUI 2x10 card grid + event loop
-  calibrate.py      # `python -m flashtool.calibrate` -> writes bench.json
-  __main__.py       # `python -m flashtool` -> launches the GUI
-bench.json          # machine-specific slot map (gitignored)
-```
-
-## Setup
-
-**System dependencies** (install before `poetry install`):
+### 1. Install system dependencies
 
 ```bash
-# Debian/Ubuntu:
+# Debian / Ubuntu
 sudo apt install python3-tk libusb-1.0-0
 
-# macOS (tkinter bundled with python.org installer):
+# macOS (tkinter ships with the python.org installer)
 brew install libusb
 ```
 
+### 2. Install Python dependencies
+
 ```bash
 cd firmware/flashtool
+pip install poetry       # if not already installed
 poetry install
 ```
 
-## Calibrate the slot map (once per bench)
+### 3. Calibrate your hub (once per hub model)
 
-Calibration identifies which USB path corresponds to each physical hub port.
-It is a **one-time task** per bench, or whenever the hub is moved to a
-different USB port on the laptop. The result is saved to `bench.json`.
-
-### Option A — GUI (recommended)
-
-Launch the app and click **Discover**. The button walks you through the same
-unplug/replug cycle as the CLI tool, writes `bench.json`, and immediately
-refreshes the slot display.
-
-```bash
-poetry run python -m flashtool
-```
-
-### Option B — CLI
+Calibration maps each physical port on the hub to a slot number. You only need
+to do this once per hub **model** — the same config file works on every machine
+and on every instance of that hub model, regardless of which USB port it is
+plugged into.
 
 ```bash
 poetry run python -m flashtool.calibrate
 ```
 
-**Step 1** — Have one board ready (or 20 — either works).
-
-**Step 2** — Follow the per-slot prompts. For each of the 20 slots the tool
-asks you to plug a board into that physical port, detects the USB path, and
-moves on:
+Follow the prompts: for each slot, plug one board into that physical port and
+press Enter. The tool detects the USB path and moves on.
 
 ```
-flashtool hub calibration
+flashtool hub calibration (20 slots)
 
 Slot 1 of 20: plug a board into physical slot 1, then press Enter…
-> [plug in, press Enter]
-  slot  0  ->  1-2.1.1
-
+  slot  0  ->  7.1
 Slot 2 of 20: plug a board into physical slot 2, then press Enter…
-> [move board to slot 2, press Enter]
-  slot  1  ->  1-2.1.2
+  slot  1  ->  7.2
 ...
-  slot 19  ->  1-2.2.10
-
-Final map (20 slots):
-  slot  0  ->  1-2.1.1
-  ...
-
-Write this to bench.json? [y/N]
+Save as (e.g. my_hub): sabrent_20_port
+Written to flashtool/usb_hubs/bench_sabrent_20_port.json
 ```
 
-With one board: unplug it from the previous slot and move it to the next before
-pressing Enter. With multiple boards: use a fresh board for each slot and leave
-them all in.
+The result is a **relative** port map (hub-root stripped) stored in
+`flashtool/usb_hubs/`. It is committed to the repo so every team member can use
+it without re-calibrating.
 
-**Step 3** — Press `y`. The slot map is written to `bench.json`.
-
-### Verifying the map
-
-Plug one board in at a time and watch which slot lights up green in the GUI to
-confirm it matches the physical label on the hub.
-
-### Re-calibrating
-
-Only needed if:
-- the hub is moved to a **different USB port on the laptop** (changes the topology prefix), or
-- boards are **rearranged** across ports (slot assignments are port-based, not board-based).
-
-Plugging the hub back into the **same** laptop port after a reboot is fine — the path is stable across reboots.
-
-## Run
+### 4. Run
 
 ```bash
-cd firmware/flashtool
 poetry run python -m flashtool
 ```
 
-## Verify VID/PID
+The app opens with one column group per detected hub. Plug boards in and watch
+slots turn green.
 
-If no boards appear after calibration, confirm the VID:PID in `config.py`
-matches your hardware:
+---
+
+## Usage
+
+### Hub selection
+
+Use the **Config** dropdown in the toolbar to select the bench config for your
+hub model. If you have multiple identical hubs, the app detects all instances
+automatically and shows them as separate column groups. New hubs can be plugged
+in while the app is running — the layout expands automatically.
+
+### Flashing
+
+Select a firmware file and click **Flash All**. Every slot that has a board
+present will be flashed in parallel. Status per slot:
+
+| Status | Meaning |
+|--------|---------|
+| `—` | No board in this port |
+| `ready` | Board present, not yet flashed |
+| `flash…` | Flashing in progress |
+| `verify…` | Verifying written data |
+| `✓ done` | Flashed successfully |
+| `✗ error` | Flash failed — check the board |
+
+### Re-calibrating
+
+You only need to re-calibrate if you get a **different hub model**. Moving the
+same hub to a different USB port on the laptop, or plugging it into a different
+machine, does not require re-calibration.
+
+To add a new hub model, re-run the calibrate script and save under a new name.
+
+---
+
+## Design notes
+
+### Port-based determinism
+
+Slots are keyed on **USB topology** — the chain of port numbers from the host
+controller to the device (e.g. `"1-4.7.1"`). This path belongs to the physical
+socket, not the board, so the same port always maps to the same slot regardless
+of which board is seated or enumeration order at power-on. A serial number is
+used only as the `probe-rs --probe` selector after a device is bound to its slot.
+
+### Portable hub configs
+
+Large hubs have multiple internal controllers, so USB paths don't follow a
+simple `prefix.1`…`prefix.N` sequence. Calibration builds an explicit per-slot
+map by asking you to plug one board at a time into each port.
+
+The config stores **relative** paths (the hub-root prefix stripped off). At
+runtime the app detects where each hub instance sits in the USB tree by matching
+board paths against the relative map, strips the right number of segments, and
+reconstructs full paths for each hub automatically. The same JSON file drives
+every instance of the same hub model on any machine.
+
+### Multi-hub support
+
+Multiple identical hubs are detected automatically. The app groups boards by hub
+instance and displays each as a separate column group. The hub count grows as
+new instances are detected; removing all boards from a hub keeps its columns
+visible (slots go absent) so the layout stays stable while boards are swapped.
+
+### Flashing backend
+
+`flasher.py` shells out to **probe-rs** over each board's onboard CMSIS-DAP.
+The backend is isolated behind a single function so it can be swapped for
+nrfutil or J-Link later. Flashing runs in a `ThreadPoolExecutor` (bounded by
+`config.MAX_CONCURRENT`); workers post progress events back to the GUI thread
+via `window.write_event_value`.
+
+---
+
+## Troubleshooting
+
+**No boards appear after plugging in**
+
+Verify the VID:PID in `config.py` matches your hardware:
 
 ```bash
-lsusb          # Linux
-probe-rs list  # cross-platform
+lsusb             # Linux
+probe-rs list     # cross-platform
 ```
 
-The Seeed XIAO nRF54L15 CMSIS-DAP probe is `0x2886:0x0066` (already set as the
-default).
+The Seeed XIAO nRF54L15 CMSIS-DAP probe is `0x2886:0x0066` (default).
+
+On Linux you may also need a udev rule to allow non-root USB access:
+
+```
+# /etc/udev/rules.d/99-vibamix.rules
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2886", ATTRS{idProduct}=="0066", MODE="0666"
+```
+
+```bash
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+**Boards appear on the wrong slots**
+
+The hub may be connected through an intermediate hub or dock that the previous
+calibration didn't account for. Re-run calibration with the hub connected the
+same way it will be used in production.
+
+**Slots don't update when boards are plugged in**
+
+The hotplug poll interval is set in `controller.py` (`start_hotplug_monitor`,
+default 0.5 s). Reduce it if faster detection is needed.
+
+---
+
+## File layout
+
+```
+flashtool/
+  config.py          # chip, probe-rs path, artifact dir, concurrency
+  models.py          # UsbDevice, Slot, Status
+  usb_topology.py    # USB enumeration, hub root detection, slot building
+  flasher.py         # probe-rs backend: flash one device, parse progress
+  controller.py      # discovery + concurrent flash dispatch (no GUI deps)
+  gui.py             # FreeSimpleGUI slot grid + event loop
+  calibrate.py       # CLI: build per-slot port map, write bench config
+  __main__.py        # entry point: `python -m flashtool`
+  usb_hubs/          # bench configs (committed; one file per hub model)
+    bench_<name>.json
+```
