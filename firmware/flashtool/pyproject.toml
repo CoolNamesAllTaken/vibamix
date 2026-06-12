@@ -1,0 +1,27 @@
+[tool.poetry]
+name = "flashtool"
+version = "0.1.0"
+description = "Concurrent multi-device USB flashing tool for vibamix boards"
+authors = ["aymzhang"]
+readme = "README.md"
+
+# System dependencies (not installable via Poetry):
+#   tkinter  — required by FreeSimpleGUI; install via OS package manager
+#              Debian/Ubuntu: sudo apt install python3-tk
+#              macOS:         comes bundled with python.org installer
+#   libusb   — required by pyusb
+#              Debian/Ubuntu: sudo apt install libusb-1.0-0
+#              macOS:         brew install libusb
+
+[tool.poetry.dependencies]
+python = "^3.10"
+freesimplegui = "^5.2.0.post1"
+pyusb = "^1.3.1"
+
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.0.3"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
