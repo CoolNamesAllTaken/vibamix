@@ -1,0 +1,5 @@
+description: LTR-329ALS-01 Ambient Light Sensor
+
+compatible: "pants-for-birds,ltr329als"
+
+include: i2c-device.yaml

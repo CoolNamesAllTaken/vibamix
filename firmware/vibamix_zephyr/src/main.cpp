@@ -15,13 +15,16 @@
 #include "GUI.h"
 #include "MeshNode.h"
 #include "LEDStrip.h"
+#include "ambient_light_sensor.h"
 
-// How long the LEDs run after a normal boot before the device deep-sleeps. A
-// button press during this window jumps straight into config mode.
+// How long the ALS reading stays on screen after a normal boot before the
+// device deep-sleeps. A button press during this window jumps straight into
+// config mode.
 static constexpr uint32_t kAwakeMs = 5000;
 
 // Ignore button edges closer together than this (contact debounce).
 static constexpr uint32_t kBtnDebounceMs = 80;
+
 
 static const struct gpio_dt_spec user_led = GPIO_DT_SPEC_GET(DT_ALIAS(user_led), gpios);
 static const struct gpio_dt_spec user_btn = GPIO_DT_SPEC_GET(DT_ALIAS(user_button), gpios);
@@ -83,15 +86,25 @@ static inline bool debugger_attached(void)
 	return (DCB->DHCSR & DCB_DHCSR_C_DEBUGEN_Msk) != 0;
 }
 
+static void update_display(void)
+{
+	struct als_reading r = ambient_light_sensor_get();
+	s_gui.wake();
+	s_gui.show_als_readings(r.lux, r.gain, r.ch0_raw, r.ch1_raw, r.valid, r.diag);
+	s_gui.sleep();
+}
+
 int main(void)
 {
 	printk("Starting vibamix\n");
 
 	bool config_mode = woke_from_button();
 
-	// Bring the LED strip up first so the boot animation is independent of the
-	// ePaper/mesh. A strip failure is non-fatal — we still deep-sleep below.
+	// Bring the LED strip up first: its power gate also feeds the ALS sensor
+	// (shared enable, active-low gate), so this powers both. A strip failure
+	// is non-fatal — we still deep-sleep below.
 	const bool leds_ok = (s_leds.init() == 0);
+	ambient_light_sensor_start();
 
 	s_gui.init();
 
@@ -116,18 +129,15 @@ int main(void)
 	if (!config_mode)
 	{
 		// Normal boot: draw the boot screen (custom image as-is, else identity,
-		// else "Hello World"), then run an awake window. A button press during
-		// the window promotes us straight into config mode.
+		// else "Hello World"), then show the ALS reading for an awake window.
+		// A button press during the window promotes us straight into config mode.
 		s_mesh.apply_persisted_config();
+		update_display();
 
 		int64_t deadline = k_uptime_get() + kAwakeMs;
 		while (k_uptime_get() < deadline && !s_btn_event)
 		{
-			if (leds_ok)
-			{
-				s_leds.render();
-			}
-			k_sleep(K_MSEC(LEDStrip::kFrameMs));
+			k_sleep(K_MSEC(50));
 		}
 		if (leds_ok)
 		{
