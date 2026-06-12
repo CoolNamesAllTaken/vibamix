@@ -16,6 +16,12 @@
                 "monitor reset halt",
                 "hbreak main",
                 "continue"
+            ],
+            "overrideRestartCommands": [
+                "load",
+                "monitor reset halt",
+                "hbreak main",
+                "continue"
             ]
         }
     ]
