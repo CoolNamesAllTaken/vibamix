@@ -10,9 +10,12 @@
 
 #include "GUI.h"
 #include "BLERadio.h"
+#include "ambient_light_sensor.h"
 
-static const struct gpio_dt_spec user_led = GPIO_DT_SPEC_GET(DT_ALIAS(user_led), gpios);
-static const struct gpio_dt_spec user_btn = GPIO_DT_SPEC_GET(DT_ALIAS(user_button), gpios);
+
+static const struct gpio_dt_spec led_enable = GPIO_DT_SPEC_GET(DT_NODELABEL(led_enable), gpios);
+static const struct gpio_dt_spec user_led   = GPIO_DT_SPEC_GET(DT_ALIAS(user_led), gpios);
+static const struct gpio_dt_spec user_btn   = GPIO_DT_SPEC_GET(DT_ALIAS(user_button), gpios);
 
 static struct gpio_callback btn_cb_data;
 
@@ -20,18 +23,29 @@ static struct gpio_callback btn_cb_data;
 static GUI      s_gui;
 static BLERadio s_ble;
 
+K_SEM_DEFINE(s_btn_sem, 0, 1);
+
 static void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-	printk("User button pressed\n");
+	k_sem_give(&s_btn_sem);
+}
+
+static void update_display(void)
+{
+	struct als_reading r = ambient_light_sensor_get();
+	s_gui.wake();
+	s_gui.show_als_readings(r.lux, r.gain, r.ch0_raw, r.ch1_raw, r.valid, r.diag);
+	s_gui.sleep();
 }
 
 int main(void)
 {
 	printk("Starting vibamix\n");
 
+	gpio_pin_configure_dt(&led_enable, GPIO_OUTPUT_ACTIVE);
+
 	s_gui.init();
-	s_gui.show_hello_world();
-	s_gui.sleep();
+	ambient_light_sensor_start();
 
 	if (!gpio_is_ready_dt(&user_led))
 	{
@@ -58,6 +72,7 @@ int main(void)
 
 	for (;;)
 	{
-		k_sleep(K_FOREVER);
+		k_sem_take(&s_btn_sem, K_FOREVER);
+		update_display();
 	}
 }
