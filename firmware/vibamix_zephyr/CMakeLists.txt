@@ -14,8 +14,11 @@ project(vibamix)
 target_sources(app PRIVATE
   src/main.cpp
   src/GUI.cpp
-  src/BLERadio.cpp
   src/LEDStrip.cpp
+  src/MeshNode.cpp
+  src/mesh_model.c
+  src/image_xfer.c
+  src/app_config.c
 )
 
 add_subdirectory(../peripherals/epd epd)

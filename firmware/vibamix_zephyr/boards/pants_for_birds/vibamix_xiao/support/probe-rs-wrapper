@@ -47,7 +47,10 @@ done
 # one — it would fail to bind the port and hang VS Code's preLaunchTask. Emit the
 # sentinel the tasks.json problemMatcher waits for and exit so cortex-debug attaches to
 # the existing server.
-if (( is_gdb )) && nc -z 127.0.0.1 "$gdb_port" 2>/dev/null; then
+# Check both IPv4 (127.0.0.1) and IPv6 (::1): probe-rs binds localhost, which on
+# many systems resolves to the IPv6 ::1 only. An IPv4-only check would miss that
+# server and try to spawn a second one, which then fails to bind the port.
+if (( is_gdb )) && { nc -z 127.0.0.1 "$gdb_port" 2>/dev/null || nc -z ::1 "$gdb_port" 2>/dev/null; }; then
     echo "Firing up GDB stub"
     exit 0
 fi
