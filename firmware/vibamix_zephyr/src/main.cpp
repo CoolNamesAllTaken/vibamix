@@ -6,11 +6,15 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/sys/poweroff.h>
 #include <zephyr/sys/printk.h>
 
 #include "GUI.h"
 #include "MeshNode.h"
 #include "LEDStrip.h"
+
+// How long the LEDs run after boot before the device deep-sleeps.
+static constexpr uint32_t kAwakeMs = 5000;
 
 static const struct gpio_dt_spec user_led = GPIO_DT_SPEC_GET(DT_ALIAS(user_led), gpios);
 static const struct gpio_dt_spec user_btn = GPIO_DT_SPEC_GET(DT_ALIAS(user_button), gpios);
@@ -31,61 +35,55 @@ int main(void)
 {
 	printk("Starting vibamix\n");
 
-	// Bring the LED strip up FIRST, before the GUI/mesh, so the startup rainbow
-	// is a reliable "I'm alive" signal that doesn't depend on the ePaper refresh
-	// or the BT/mesh stack succeeding. A strip failure is non-fatal.
+	// Bring the LED strip up first so the boot animation is independent of the
+	// ePaper/mesh. A strip failure is non-fatal — we still deep-sleep below.
 	const bool leds_ok = (s_leds.init() == 0);
-	if (leds_ok)
-	{
-		// Brief startup animation as an early "alive" signal before GUI/mesh;
-		// the main loop below carries the same scrolling wheel + blob on
-		// continuously until a mesh command sets a solid color.
-		s_leds.play_for(3000);
-	}
 
 	s_gui.init();
 	s_gui.show_hello_world();
 	s_gui.sleep();
 
-	if (!gpio_is_ready_dt(&user_led))
+	if (gpio_is_ready_dt(&user_led))
 	{
-		printk("LED device not ready\n");
-		return 0;
+		gpio_pin_configure_dt(&user_led, GPIO_OUTPUT_INACTIVE);
 	}
-	gpio_pin_configure_dt(&user_led, GPIO_OUTPUT_INACTIVE);
 
-	if (!gpio_is_ready_dt(&user_btn))
+	const bool btn_ready = gpio_is_ready_dt(&user_btn);
+	if (btn_ready)
 	{
-		printk("Button device not ready\n");
-		return 0;
+		gpio_pin_configure_dt(&user_btn, GPIO_INPUT);
+		gpio_pin_interrupt_configure_dt(&user_btn, GPIO_INT_EDGE_TO_ACTIVE);
+		gpio_init_callback(&btn_cb_data, button_pressed, BIT(user_btn.pin));
+		gpio_add_callback(user_btn.port, &btn_cb_data);
 	}
-	gpio_pin_configure_dt(&user_btn, GPIO_INPUT);
-	gpio_pin_interrupt_configure_dt(&user_btn, GPIO_INT_EDGE_TO_ACTIVE);
-	gpio_init_callback(&btn_cb_data, button_pressed, BIT(user_btn.pin));
-	gpio_add_callback(user_btn.port, &btn_cb_data);
 
 	// Bring up the mesh node (BT + mesh stack, self-provision, GATT proxy).
-	if (s_mesh.init(&s_gui, &s_leds) != 0)
-	{
-		return 0;
-	}
+	// Non-fatal: even if it fails we still run the LED animation and deep-sleep.
+	s_mesh.init(&s_gui, &s_leds);
 
-	// Apply any persisted identity/color now that LEDs are up (switches the
-	// strip to a solid color if one was saved; otherwise it stays Off).
+	// Apply any persisted identity/color (switches the strip to a solid color
+	// if one was saved; otherwise it shows the scrolling wheel + blob).
 	s_mesh.apply_persisted_config();
 
-	if (!leds_ok)
+	// Run the LEDs for kAwakeMs, then power everything down.
+	if (leds_ok)
 	{
-		// No LED strip — keep the rest of the firmware running.
-		for (;;)
-		{
-			k_sleep(K_FOREVER);
-		}
+		s_leds.play_for(kAwakeMs);
+		s_leds.off();          // blank the chain + cut the LED power gate
+	}
+	else
+	{
+		k_sleep(K_MSEC(kAwakeMs));
 	}
 
-	for (;;)
+	// Enter deep sleep (System OFF). The ePaper is bistable and keeps its image.
+	// Wake by reset, or by pressing the user button (armed as a wake source).
+	printk("Entering deep sleep\n");
+	if (btn_ready)
 	{
-		s_leds.render();
-		k_sleep(K_MSEC(LEDStrip::kFrameMs));
+		gpio_pin_interrupt_configure_dt(&user_btn, GPIO_INT_LEVEL_ACTIVE);
 	}
+	sys_poweroff();
+
+	return 0;
 }

@@ -89,6 +89,15 @@ void LEDStrip::render()
     m_tick++;
 }
 
+void LEDStrip::off()
+{
+    // Push black out first (while still powered), then cut the power gate so
+    // the WS2812 VDD rail collapses and the chain draws no current in sleep.
+    m_pattern = LedPattern::Off;
+    render_off();
+    gpio_pin_set_dt(&s_power, 0);   // logical 0 = inactive = PMOS off (active-low gate)
+}
+
 void LEDStrip::play_for(uint32_t duration_ms)
 {
     const int64_t deadline = k_uptime_get() + duration_ms;

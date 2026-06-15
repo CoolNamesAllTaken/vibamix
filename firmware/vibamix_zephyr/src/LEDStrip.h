@@ -39,6 +39,10 @@ public:
     // Draw one frame of the active pattern and advance its animation clock.
     void render();
 
+    // Blank the chain and cut the WS2812 power gate (PMOS off), e.g. before
+    // deep sleep so the strip draws no current.
+    void off();
+
     // Blocking: render the active pattern for `duration_ms` as a boot "alive"
     // signal before the GUI/mesh come up. Shares the animation clock with
     // render(), so the main loop continues the same animation seamlessly.
