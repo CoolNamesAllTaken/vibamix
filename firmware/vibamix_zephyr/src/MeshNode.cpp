@@ -1,10 +1,12 @@
 #include "MeshNode.h"
 
 #include "app_config.h"
+#include "identity.h"
 #include "image_xfer.h"
 #include "mesh_keys.h"
 #include "mesh_model.h"
 
+#include <stdio.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/mesh.h>
 #include <zephyr/drivers/hwinfo.h>
@@ -78,12 +80,19 @@ int MeshNode::init(GUI *gui, LEDStrip *leds)
     // Restores persisted app config and (with CONFIG_BT_SETTINGS) mesh seq/RPL.
     settings_load();
 
-    // Deterministic identity: unicast address from the FICR device id.
+    // Per-device GAP name "vibamix-XXXX" so a phone (Web Bluetooth) can pick this
+    // exact badge out of the chooser. The mesh proxy advertising carries it in its
+    // scan response (CONFIG_BT_MESH_PROXY_USE_DEVICE_NAME).
+    char code[5];
+    app_identity_code(code);
+    char name[16];
+    snprintf(name, sizeof(name), "vibamix-%s", code);
+    bt_set_name(name);
+
+    // Deterministic identity: unicast address from the FICR device id (the
+    // provisioning UUID also uses that id).
     hwinfo_get_device_id(s_dev_uuid, sizeof(s_dev_uuid));
-    uint16_t addr = (sys_get_le16(s_dev_uuid) & 0x7FFF);
-    if (addr == 0) {
-        addr = 1;   // unicast addresses must be non-zero
-    }
+    uint16_t addr = app_identity_addr();
 
     if (!bt_mesh_is_provisioned()) {
         static const uint8_t net_key[16] = VIBAMIX_NET_KEY;
@@ -118,8 +127,20 @@ void MeshNode::apply_persisted_config()
     if (cfg->has_color && m_leds) {
         m_leds->set_color(cfg->r, cfg->g, cfg->b);
     }
-    if (cfg->has_name) {
+
+    // Single boot-display authority. The panel was left awake by GUI::init().
+    if (!m_gui) {
+        return;
+    }
+    if (cfg->has_custom_image) {
+        // Leave the user's bistable image untouched; just release the panel.
+        m_gui->sleep();
+    } else if (cfg->has_name) {
         redraw_identity();
+    } else {
+        // First boot, nothing configured yet.
+        m_gui->show_hello_world();
+        m_gui->sleep();
     }
 }
 
@@ -161,4 +182,5 @@ void MeshNode::on_image(const uint8_t *buf, size_t len, uint16_t w, uint16_t h)
         m_gui->render_image(buf, len);
         m_gui->sleep();
     }
+    app_config_set_has_image(true);
 }

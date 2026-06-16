@@ -22,6 +22,15 @@ public:
 
     void sleep();
 
+    // Full refresh that also sets the partial-refresh baseline (both RAM banks),
+    // for screens that will then be updated with refresh_partial(). Renders
+    // whatever is currently in framebuffer().
+    void set_base_map();
+
+    // Fast, flash-free differential update of the current framebuffer. Requires a
+    // prior set_base_map(). Use for the live config-screen countdown.
+    void refresh_partial();
+
     // The display framebuffer, shared with image_xfer for in-place reassembly.
     uint8_t *framebuffer() { return m_image; }
     size_t   framebuffer_size() const { return sizeof(m_image); }

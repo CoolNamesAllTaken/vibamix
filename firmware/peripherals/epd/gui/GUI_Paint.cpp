@@ -477,6 +477,85 @@ void Paint_DrawString_EN(UWORD Xstart, UWORD Ystart, const char * pString,
 
 
 /******************************************************************************
+function:	Draw one proportional (pFONT) glyph at (Xpoint, Ypoint).
+            Each glyph has its own advance width; bitmap rows are MSB-first.
+******************************************************************************/
+void Paint_DrawChar_P(UWORD Xpoint, UWORD Ypoint, const char Acsii_Char,
+                      pFONT* Font, UWORD Color_Background, UWORD Color_Foreground)
+{
+    if (Acsii_Char < ' ' || Acsii_Char > '~') {
+        return;
+    }
+
+    UWORD idx       = (UWORD)(Acsii_Char - ' ');
+    UWORD width     = Font->widths[idx];
+    UWORD row_bytes = (width + 7) / 8;
+    const uint8_t *ptr = &Font->table[Font->offsets[idx]];
+
+    for (UWORD Page = 0; Page < Font->Height; Page++) {
+        for (UWORD Column = 0; Column < width; Column++) {
+            uint8_t byte = ptr[Page * row_bytes + (Column >> 3)];
+            if (byte & (0x80 >> (Column & 7))) {
+                Paint_SetPixel(Xpoint + Column, Ypoint + Page, Color_Foreground);
+            } else if (FONT_BACKGROUND != Color_Background) {
+                Paint_SetPixel(Xpoint + Column, Ypoint + Page, Color_Background);
+            }
+        }
+    }
+}
+
+/******************************************************************************
+function:	Display a string in a proportional (pFONT) font, advancing by each
+            glyph's own width. Wraps to the next line at the right edge; stops
+            when there's no more vertical room.
+******************************************************************************/
+void Paint_DrawString_P(UWORD Xstart, UWORD Ystart, const char * pString,
+                        pFONT* Font, UWORD Color_Background, UWORD Color_Foreground)
+{
+    UWORD Xpoint = Xstart;
+    UWORD Ypoint = Ystart;
+
+    if (Xstart > Paint.Width || Ystart > Paint.Height) {
+        return;
+    }
+
+    while (* pString != '\0') {
+        char ch = * pString++;
+        if (ch < ' ' || ch > '~') {
+            continue;
+        }
+        UWORD width = Font->widths[ch - ' '];
+
+        if ((Xpoint + width) > Paint.Width) {
+            Xpoint = Xstart;
+            Ypoint += Font->Height;
+        }
+        if ((Ypoint + Font->Height) > Paint.Height) {
+            break;
+        }
+        Paint_DrawChar_P(Xpoint, Ypoint, ch, Font, Color_Background, Color_Foreground);
+        Xpoint += width;
+    }
+}
+
+/******************************************************************************
+function:	Pixel width a string would occupy in a proportional (pFONT) font.
+            Lets callers word-wrap by measuring instead of assuming fixed width.
+******************************************************************************/
+UWORD Paint_StringWidth_P(const char * pString, pFONT* Font)
+{
+    UWORD w = 0;
+    while (* pString != '\0') {
+        char ch = * pString++;
+        if (ch >= ' ' && ch <= '~') {
+            w += Font->widths[ch - ' '];
+        }
+    }
+    return w;
+}
+
+
+/******************************************************************************
 function:	Display the string
 parameter:
     Xstart           ：X coordinate

@@ -35,6 +35,45 @@ void EPD_Display(unsigned char *Image)
 	EPD_Update();
 }
 
+// Writes Image to the just-selected RAM bank using the SAME row-reversal as
+// EPD_Display, so a framebuffer authored for EPD_Display keeps its orientation.
+// (EPD_SetRAMValue_BaseMap / EPD_Dis_Part write linearly and would flip it.)
+static void Epaper_Write_RowReversed(const unsigned char *Image)
+{
+	const unsigned int width = (EPD_WIDTH % 8 == 0) ? (EPD_WIDTH / 8) : (EPD_WIDTH / 8 + 1);
+	const unsigned int length = width * EPD_HEIGHT;
+	unsigned int tempcol = 1, templine = 0;
+
+	for (unsigned int i = 0; i < length; i++) {
+		Epaper_Write_Data(Image[length - (width * tempcol - i % width)]);
+		if (++templine >= width) {
+			tempcol++;
+			templine = 0;
+		}
+	}
+}
+
+// Establishes the partial-refresh baseline: writes Image (row-reversed) into BOTH
+// RAM banks (0x24 new, 0x26 old) and does one full refresh. Call before a run of
+// EPD_Display_Partial() updates.
+void EPD_SetBaseMap(const unsigned char *Image)
+{
+	Epaper_Write_Command(0x24);
+	Epaper_Write_RowReversed(Image);
+	Epaper_Write_Command(0x26);
+	Epaper_Write_RowReversed(Image);
+	EPD_Update();
+}
+
+// Fast, flash-free differential update: writes Image (row-reversed) to bank 0x24
+// and runs the partial waveform. Requires a prior EPD_SetBaseMap().
+void EPD_Display_Partial(const unsigned char *Image)
+{
+	Epaper_Write_Command(0x24);
+	Epaper_Write_RowReversed(Image);
+	EPD_Part_Update();
+}
+
 void Epaper_Spi_WriteByte(unsigned char TxData)
 {
 	SPI_Write(TxData);

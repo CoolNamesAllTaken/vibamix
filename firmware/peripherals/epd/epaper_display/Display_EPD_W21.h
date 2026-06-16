@@ -34,7 +34,9 @@ void EPD_Dis_Part_myself(unsigned int x_startA,unsigned int y_startA,const unsig
 	                      );
 //Display canvas function
 void EPD_HW_Init_GUI(void); //EPD init GUI
-void EPD_Display(unsigned char *Image); 
+void EPD_Display(unsigned char *Image);
+void EPD_SetBaseMap(const unsigned char *Image);     // set partial-refresh baseline (both RAM banks)
+void EPD_Display_Partial(const unsigned char *Image); // fast flash-free differential update
 void EPD_HW_Init_P(void);
 void EPD_Standby(void);
 

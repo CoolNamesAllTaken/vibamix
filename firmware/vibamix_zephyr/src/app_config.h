@@ -27,6 +27,10 @@ struct app_config {
 	uint8_t r, g, b;
 	bool    has_color;
 	bool    has_name;
+	/* A user-drawn full-screen image is currently shown. Persisted so the boot
+	 * identity redraw is skipped and the bistable image is preserved. Set when an
+	 * image is rendered; cleared when name/fact text replaces the screen. */
+	bool    has_custom_image;
 };
 
 /* Register the settings handler. Call before settings_load(). */
@@ -37,6 +41,7 @@ const struct app_config *app_config_get(void);
 void app_config_set_name(const char *s, size_t len);
 void app_config_set_fun_fact(const char *s, size_t len);
 void app_config_set_color(uint8_t r, uint8_t g, uint8_t b);
+void app_config_set_has_image(bool has_image);
 
 #ifdef __cplusplus
 }
