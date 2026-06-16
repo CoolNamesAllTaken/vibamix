@@ -3,6 +3,8 @@
 #include <nordic/nrf54l15_cpuapp.dtsi>
 #include "vibamix_xiao-pinctrl.dtsi"
 #include <zephyr/dt-bindings/led/led.h>
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/adc/nrf-saadc.h>
 
 / {
 	model = "Xiao NRF54L15 ePaper badge.";
@@ -14,6 +16,7 @@
 		zephyr,flash = &cpuapp_rram;
 		zephyr,flash-controller = &rram_controller;
 		zephyr,console = &uart22;
+		zephyr,settings-partition = &storage_partition;
 	};
 
 	/* LED strip power enable - active low */
@@ -25,6 +28,18 @@
 		user_led: user_led {
 			gpios = <&gpio2 0 GPIO_ACTIVE_LOW>;    /* P2.00 USER_LED  */
 		};
+		/* TPS22916 load switch enabling the battery-voltage divider.
+		 * Drive active only while sampling the battery (it powers the 10K/10K
+		 * divider on the AIN7 net) — see src/battery.c. */
+		vbat_enable: vbat_enable {
+			gpios = <&gpio1 15 GPIO_ACTIVE_HIGH>;  /* P1.15 VBAT_EN */
+		};
+	};
+
+	/* Battery voltage monitor: VBAT -> load switch -> 10K/10K divider -> P1.14 (AIN7).
+	 * battery_mV = AIN7_mV * 2. */
+	zephyr,user {
+		io-channels = <&adc 0>;
 	};
 
 	buttons {
@@ -43,6 +58,24 @@
 	};
 };
 
+/* Battery-voltage ADC on AIN7 (P1.14). Internal 0.6 V ref + gain 1/6 -> 0..3.6 V
+ * range covers the ~1.5..2.1 V divider output for a 1S LiPo (3.0..4.2 V). */
+&adc {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,vref-mv = <600>;
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN7>;   /* P1.14 divider midpoint */
+		zephyr,resolution = <12>;
+	};
+};
+
 /* Logging UART */
 &uart22 {
 	compatible = "nordic,nrf-uarte";
@@ -53,12 +86,17 @@
 	current-speed = <115200>;
 };
 
-/* ePaper display on SPI20 */
-&spi20 {
+/* ePaper display on SPI00 (high-speed SERIAL00).
+ * NOT on spi20: spi20 and i2c20 are the same SERIAL20 hardware block and are
+ * mutually exclusive, so the display would clash with the light sensor on i2c20.
+ * spi00 is the free high-speed SPIM and reaches the same P2.01/P2.02 pins, so the
+ * ePaper lives here and the sensor keeps SERIAL20 — both run concurrently.
+ */
+&spi00 {
 	compatible = "nordic,nrf-spim";
 	status = "okay";
-	pinctrl-0 = <&spi20_default>;
-	pinctrl-1 = <&spi20_sleep>;
+	pinctrl-0 = <&spi00_default>;
+	pinctrl-1 = <&spi00_sleep>;
 	pinctrl-names = "default", "sleep";
 	cs-gpios = <&gpio2 7 GPIO_ACTIVE_LOW>;        /* P2.07 SCREEN_CS  */
 
@@ -66,8 +104,8 @@
 		compatible = "pants-for-birds,epaper";
 		reg = <0>;
 		spi-max-frequency = <4000000>;
-		width = <250>;
-		height = <122>;
+		width = <176>;
+		height = <264>;
 		dc-gpios = <&gpio2 8 GPIO_ACTIVE_LOW>;    /* P2.08 SCREEN_D/C  */
 		reset-gpios = <&gpio2 9 GPIO_ACTIVE_LOW>;    /* P2.09 SCREEN_RES  */
 		busy-gpios = <&gpio2 10 GPIO_ACTIVE_HIGH>;    /* P2.10 SCREEN_BUSY */
@@ -85,17 +123,24 @@
 	led_strip: ws2812@0 {
 		compatible = "worldsemi,ws2812-spi";
 		reg = <0>;
-		spi-max-frequency = <DT_FREQ_M(8)>;
-		chain-length = <1>;            /* update to your actual LED count */
+		/* 4 MHz: one SPI bit = 250 ns, so the frame patterns below give a
+		 * 750 ns "1" pulse (T1H) and 250 ns "0" pulse (T0H). The 0x70/0x40
+		 * pair is ONLY valid at 4 MHz — at 8 MHz the "1" pulse halves to
+		 * 375 ns and every WS2812 bit decodes as 0 (all LEDs stay dark).
+		 */
+		spi-max-frequency = <DT_FREQ_M(4)>;
+		chain-length = <4>;            /* D4-D7 WS2812B chain */
 		color-mapping = <LED_COLOR_ID_GREEN
 		LED_COLOR_ID_RED
 		LED_COLOR_ID_BLUE>;
-		spi-one-frame = <0x70>;
-		spi-zero-frame = <0x40>;
+		spi-one-frame = <0x70>;        /* 0b01110000: 750 ns high @ 4 MHz */
+		spi-zero-frame = <0x40>;       /* 0b01000000: 250 ns high @ 4 MHz */
 	};
 };
 
-/* Light sensor I2C bus */
+/* Light sensor I2C bus (SERIAL20). Free to use now that the ePaper moved off
+ * spi20 to the high-speed spi00 — see the ePaper node above.
+ */
 &i2c20 {
 	compatible = "nordic,nrf-twim";
 	status = "okay";

@@ -14,9 +14,19 @@ project(vibamix)
 target_sources(app PRIVATE
   src/main.cpp
   src/GUI.cpp
-  src/BLERadio.cpp
+  src/LEDStrip.cpp
+  src/MeshNode.cpp
+  src/mesh_model.c
+  src/image_xfer.c
+  src/app_config.c
+  src/identity.c
+  src/qr_screen.cpp
+  src/config_gatt.c
+  src/ConfigMode.cpp
+  src/battery.c
 )
 
 add_subdirectory(../peripherals/epd epd)
+add_subdirectory(../peripherals/qrcodegen qrcodegen)
 
 # NORDIC SDK APP END

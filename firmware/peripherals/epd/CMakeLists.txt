@@ -7,6 +7,9 @@ target_sources(app PRIVATE
   fonts/font16.cpp
   fonts/font20.cpp
   fonts/font24.cpp
+  fonts/poppins_sb24.cpp
+  fonts/poppins_md20.cpp
+  fonts/poppins_md16.cpp
 )
 
 target_include_directories(app PRIVATE

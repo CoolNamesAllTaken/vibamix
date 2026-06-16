@@ -1,14 +1,68 @@
 {
+    // NOTE: the absolute paths below are pinned to NCS v3.3.0 and toolchain hash
+    // 0c0f19d91c. If you change SDK/toolchain version, update TC (the toolchain
+    // dir) and ZEPHYR_BASE in the build tasks' "env" blocks.
     "version": "2.0.0",
     "tasks": [
+        {
+            "label": "West Build (vibamix)",
+            "type": "shell",
+            "command": "west",
+            "args": [
+                "build",
+                "-b", "vibamix_xiao/nrf54l15/cpuapp",
+                "--",
+                "-DBOARD_ROOT=${workspaceFolder}/firmware/vibamix_zephyr"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/firmware/vibamix_zephyr",
+                "env": {
+                    "PATH": "/opt/nordic/ncs/toolchains/0c0f19d91c/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/usr/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/usr/local/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/nanopb/generator-bin:/opt/nordic/ncs/toolchains/0c0f19d91c/nrfutil/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk/arm-zephyr-eabi/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk/riscv64-zephyr-elf/bin:${env:PATH}",
+                    "ZEPHYR_TOOLCHAIN_VARIANT": "zephyr",
+                    "ZEPHYR_SDK_INSTALL_DIR": "/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk",
+                    "ZEPHYR_BASE": "/opt/nordic/ncs/v3.3.0/zephyr",
+                    "NRFUTIL_HOME": "/opt/nordic/ncs/toolchains/0c0f19d91c/nrfutil/home"
+                }
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "West Build (pristine)",
+            "type": "shell",
+            "command": "west",
+            "args": [
+                "build",
+                "-p", "always",
+                "-b", "vibamix_xiao/nrf54l15/cpuapp",
+                "--",
+                "-DBOARD_ROOT=${workspaceFolder}/firmware/vibamix_zephyr"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/firmware/vibamix_zephyr",
+                "env": {
+                    "PATH": "/opt/nordic/ncs/toolchains/0c0f19d91c/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/usr/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/usr/local/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/nanopb/generator-bin:/opt/nordic/ncs/toolchains/0c0f19d91c/nrfutil/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk/arm-zephyr-eabi/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk/riscv64-zephyr-elf/bin:${env:PATH}",
+                    "ZEPHYR_TOOLCHAIN_VARIANT": "zephyr",
+                    "ZEPHYR_SDK_INSTALL_DIR": "/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk",
+                    "ZEPHYR_BASE": "/opt/nordic/ncs/v3.3.0/zephyr",
+                    "NRFUTIL_HOME": "/opt/nordic/ncs/toolchains/0c0f19d91c/nrfutil/home"
+                }
+            },
+            "group": "build",
+            "problemMatcher": ["$gcc"]
+        },
         {
             "label": "probe-rs GDB server",
             "type": "shell",
             "command": "${workspaceFolder}/firmware/vibamix_zephyr/boards/pants_for_birds/vibamix_xiao/support/probe-rs-wrapper",
             "args": [
                 "gdb",
-                "--chip", "nRF54L15",
-                "--probe", "6F643EB8"
+                "--chip",
+                "nRF54L15",
+                // "--probe", "6F643EB8"
             ],
             "isBackground": true,
             "problemMatcher": {
