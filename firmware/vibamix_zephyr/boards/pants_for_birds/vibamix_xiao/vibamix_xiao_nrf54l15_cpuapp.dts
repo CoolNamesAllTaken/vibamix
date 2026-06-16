@@ -53,9 +53,7 @@
 	current-speed = <115200>;
 };
 
-/* ePaper display on SPI00 (high-speed SERIAL00).
- * Moved off spi20 so SERIAL20 is free for i2c20 (ALS sensor).
- */
+/* ePaper display on SPI00 (high-speed SERIAL00). */
 &spi00 {
 	compatible = "nordic,nrf-spim";
 	status = "okay";
@@ -97,7 +95,7 @@
 	};
 };
 
-/* ALS sensor on SERIAL20 — free now that ePaper moved to spi00 */
+/* ALS sensor on SERIAL20 */
 &i2c20 {
 	compatible = "nordic,nrf-twim";
 	status = "okay";
