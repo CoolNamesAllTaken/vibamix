@@ -86,6 +86,25 @@ static inline bool debugger_attached(void)
 	return (DCB->DHCSR & DCB_DHCSR_C_DEBUGEN_Msk) != 0;
 }
 
+// Flash red -> green -> blue -> white (500 ms each) as a boot "alive" signal.
+// Also gives the ALS sensor ~2 s to produce its first reading before the
+// boot screen draws it.
+static void led_boot_sequence(void)
+{
+	static const struct { uint8_t r, g, b; } k_colors[] = {
+		{255,   0,   0},  // red
+		{  0, 255,   0},  // green
+		{  0,   0, 255},  // blue
+		{255, 255, 255},  // white
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(k_colors); i++) {
+		s_leds.set_color(k_colors[i].r, k_colors[i].g, k_colors[i].b);
+		s_leds.render();
+		k_sleep(K_MSEC(500));
+	}
+	s_leds.off();
+}
+
 static void update_display(void)
 {
 	struct als_reading r = ambient_light_sensor_get();
@@ -104,7 +123,11 @@ int main(void)
 	// (shared enable, active-low gate), so this powers both. A strip failure
 	// is non-fatal — we still deep-sleep below.
 	const bool leds_ok = (s_leds.init() == 0);
-	ambient_light_sensor_start();
+	ambient_light_sensor_start();  // start early — boot sequence gives ALS time to get first reading
+	if (leds_ok)
+	{
+		led_boot_sequence();
+	}
 
 	s_gui.init();
 

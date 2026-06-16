@@ -123,31 +123,28 @@
 	led_strip: ws2812@0 {
 		compatible = "worldsemi,ws2812-spi";
 		reg = <0>;
-		/* 4 MHz: one SPI bit = 250 ns, so the frame patterns below give a
-		 * 750 ns "1" pulse (T1H) and 250 ns "0" pulse (T0H). The 0x70/0x40
-		 * pair is ONLY valid at 4 MHz — at 8 MHz the "1" pulse halves to
-		 * 375 ns and every WS2812 bit decodes as 0 (all LEDs stay dark).
-		 */
-		spi-max-frequency = <DT_FREQ_M(4)>;
+		spi-max-frequency = <DT_FREQ_M(8)>;
 		chain-length = <4>;            /* D4-D7 WS2812B chain */
 		color-mapping = <LED_COLOR_ID_GREEN
-		LED_COLOR_ID_RED
-		LED_COLOR_ID_BLUE>;
-		spi-one-frame = <0x70>;        /* 0b01110000: 750 ns high @ 4 MHz */
-		spi-zero-frame = <0x40>;       /* 0b01000000: 250 ns high @ 4 MHz */
+		                 LED_COLOR_ID_RED
+		                 LED_COLOR_ID_BLUE>;
+		spi-one-frame = <0xF8>;  /* 5 high bits @ 8MHz = 625ns — T1H [580-1000ns] */
+		spi-zero-frame = <0xC0>; /* 2 high bits @ 8MHz = 250ns — T0H [220-380ns] */
 	};
 };
 
-/* Light sensor I2C bus (SERIAL20). Free to use now that the ePaper moved off
- * spi20 to the high-speed spi00 — see the ePaper node above.
- */
+/* ALS sensor on SERIAL20 — free now that ePaper moved to spi00 */
 &i2c20 {
 	compatible = "nordic,nrf-twim";
 	status = "okay";
 	pinctrl-0 = <&i2c20_default>;
 	pinctrl-1 = <&i2c20_sleep>;
 	pinctrl-names = "default", "sleep";
-	/* add sensor child node here once you know the I2C address and compatible */
+	als: ltr329als@29 {
+		compatible = "pants-for-birds,ltr329als";
+		reg = <0x29>;
+		status = "okay";
+	};
 };
 
 &lfxo {

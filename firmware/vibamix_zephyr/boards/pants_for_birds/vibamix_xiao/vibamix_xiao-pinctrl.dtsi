@@ -20,11 +20,11 @@
 		};
 	};
 
-	/* WS2812 LED strip - SCK routed to NC P1.05, only MOSI (DIN) is wired */
+	/* WS2812 LED strip on SPI21 - SCK routed to NC P1.05, only MOSI (DIN) is wired */
 	spi21_default: spi21_default {
 		group1 {
-			psels = <NRF_PSEL(SPIM_MOSI, 1, 6)>,	/* P1.06 LED_DIN  */
-				<NRF_PSEL(SPIM_SCK,  1, 5)>;	/* P1.05 NC       */
+			psels = <NRF_PSEL(SPIM_MOSI, 1, 6)>,	/* P1.06 LED_DIN */
+				<NRF_PSEL(SPIM_SCK,  1, 5)>;	/* P1.05 NC      */
 		};
 	};
 
@@ -35,6 +35,7 @@
 			low-power-enable;
 		};
 	};
+
 
 	/* UART22 - logging */
 	uart22_default: uart22_default {
