@@ -27,7 +27,14 @@ public:
     void on_set_name(const char *name, size_t len);
     void on_set_fun_fact(const char *fact, size_t len);
     void on_set_led_color(uint8_t r, uint8_t g, uint8_t b);
-    void on_image(const uint8_t *buf, size_t len, uint16_t w, uint16_t h);
+    // image_xfer completion: store to `slot` (0xFF = render-only) + render.
+    void on_image(uint8_t slot, uint8_t fmt, const uint8_t *buf, size_t len,
+                  uint16_t w, uint16_t h);
+    // Store a text screen (header + body) at `idx`.
+    void on_set_screen(uint8_t idx, const char *hdr, size_t hlen,
+                       const char *body, size_t blen);
+    // Render a stored screen: kind 0 = text screen, 1 = image slot.
+    void on_display_screen(uint8_t kind, uint8_t idx);
 
 private:
     void redraw_identity();

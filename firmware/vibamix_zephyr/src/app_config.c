@@ -1,6 +1,8 @@
 #include "app_config.h"
 
 #include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/printk.h>
@@ -49,6 +51,46 @@ static int cfg_set(const char *key, size_t len, settings_read_cb read_cb, void *
 			s_cfg.has_custom_image = (flag != 0);
 		}
 		return 0;
+	}
+	if (settings_name_steq(key, "disp", &next) && !next) {
+		uint8_t d[2];
+
+		rc = read_cb(cb_arg, d, sizeof(d));
+		if (rc == sizeof(d)) {
+			s_cfg.disp_kind = d[0];
+			s_cfg.disp_idx = d[1];
+			s_cfg.has_disp = true;
+		}
+		return 0;
+	}
+	if (settings_name_steq(key, "scr", &next) && next) {
+		/* next = "<idx>/<field>" where field is 'h' (header) or 'b' (body). */
+		char *end;
+		long idx = strtol(next, &end, 10);
+
+		if (idx < 0 || idx >= APP_CFG_SCREEN_COUNT || *end != '/') {
+			return -ENOENT;
+		}
+		struct badge_screen *scr = &s_cfg.screens[idx];
+		const char *field = end + 1;
+
+		if (strcmp(field, "h") == 0) {
+			rc = read_cb(cb_arg, scr->header, sizeof(scr->header) - 1);
+			if (rc >= 0) {
+				scr->header[rc] = '\0';
+				scr->present = true;
+			}
+			return 0;
+		}
+		if (strcmp(field, "b") == 0) {
+			rc = read_cb(cb_arg, scr->body, sizeof(scr->body) - 1);
+			if (rc >= 0) {
+				scr->body[rc] = '\0';
+				scr->present = true;
+			}
+			return 0;
+		}
+		return -ENOENT;
 	}
 	return -ENOENT;
 }
@@ -113,4 +155,53 @@ void app_config_set_has_image(bool has_image)
 	s_cfg.has_custom_image = has_image;
 	settings_save_one(CFG_SUBTREE "/img", &flag, sizeof(flag));
 	printk("cfg: has_custom_image=%d\n", flag);
+}
+
+void app_config_set_screen(uint8_t idx, const char *hdr, size_t hlen,
+			   const char *body, size_t blen)
+{
+	if (idx >= APP_CFG_SCREEN_COUNT) {
+		return;
+	}
+	struct badge_screen *scr = &s_cfg.screens[idx];
+	char key[24];
+
+	if (hlen >= sizeof(scr->header)) {
+		hlen = sizeof(scr->header) - 1;
+	}
+	memcpy(scr->header, hdr, hlen);
+	scr->header[hlen] = '\0';
+
+	if (blen >= sizeof(scr->body)) {
+		blen = sizeof(scr->body) - 1;
+	}
+	memcpy(scr->body, body, blen);
+	scr->body[blen] = '\0';
+	scr->present = true;
+
+	snprintf(key, sizeof(key), CFG_SUBTREE "/scr/%u/h", idx);
+	settings_save_one(key, scr->header, hlen);
+	snprintf(key, sizeof(key), CFG_SUBTREE "/scr/%u/b", idx);
+	settings_save_one(key, scr->body, blen);
+	printk("cfg: screen %u set (hdr \"%s\", %u body bytes)\n", idx, scr->header,
+	       (unsigned)blen);
+}
+
+const struct badge_screen *app_config_get_screen(uint8_t idx)
+{
+	if (idx >= APP_CFG_SCREEN_COUNT || !s_cfg.screens[idx].present) {
+		return NULL;
+	}
+	return &s_cfg.screens[idx];
+}
+
+void app_config_set_display(uint8_t kind, uint8_t idx)
+{
+	uint8_t d[2] = { kind, idx };
+
+	s_cfg.disp_kind = kind;
+	s_cfg.disp_idx = idx;
+	s_cfg.has_disp = true;
+	settings_save_one(CFG_SUBTREE "/disp", d, sizeof(d));
+	printk("cfg: display kind=%u idx=%u\n", kind, idx);
 }

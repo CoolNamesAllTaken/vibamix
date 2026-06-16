@@ -12,6 +12,7 @@
 #include <zephyr/bluetooth/hci_types.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/printk.h>
 
 // Base URL the QR encodes; the page reads `id`. Set this to your GitHub Pages URL.
@@ -30,6 +31,10 @@ static volatile bool    s_exit;
 static volatile bool    s_content_shown; // an image/name took over the screen
 static struct bt_conn  *s_conn; // most-recent connection, for a clean teardown
 
+// Set from the mesh-RX (BT) thread; consumed on the main thread so only the main
+// thread ever writes the 64-bit s_last_activity (no torn write on the 32-bit M33).
+static atomic_t s_heartbeat_pending;
+
 extern "C" {
 
 static void cb_name(const char *s, size_t len)
@@ -42,9 +47,21 @@ static void cb_activity(void)
     if (s_self) { s_self->note_activity(); }
 }
 
-static void cb_image(const uint8_t *buf, size_t len, uint16_t w, uint16_t h)
+static void cb_image(uint8_t slot, uint8_t fmt, const uint8_t *buf, size_t len,
+                     uint16_t w, uint16_t h)
 {
-    if (s_self) { s_self->on_content_image(buf, len, w, h); }
+    if (s_self) { s_self->on_content_image(slot, fmt, buf, len, w, h); }
+}
+
+static void cb_screen(uint8_t idx, const char *hdr, size_t hlen,
+                      const char *body, size_t blen)
+{
+    if (s_self) { s_self->on_screen(idx, hdr, hlen, body, blen); }
+}
+
+static void cb_display(uint8_t kind, uint8_t idx)
+{
+    if (s_self) { s_self->on_display(kind, idx); }
 }
 
 void config_mode_on_button(void)
@@ -52,11 +69,24 @@ void config_mode_on_button(void)
     if (s_self) { s_self->request_exit(); }
 }
 
+void config_mode_on_heartbeat(void)
+{
+    atomic_set(&s_heartbeat_pending, 1);
+}
+
+void config_mode_on_content(void)
+{
+    atomic_set(&s_heartbeat_pending, 1);
+    s_content_shown = true;
+}
+
 } // extern "C"
 
 static const struct config_gatt_callbacks s_gatt_cb = {
     .on_name     = cb_name,
     .on_activity = cb_activity,
+    .on_screen   = cb_screen,
+    .on_display  = cb_display,
 };
 
 static void conn_connected(struct bt_conn *conn, uint8_t err)
@@ -106,11 +136,30 @@ void ConfigMode::on_name(const char *s, size_t len)
     s_content_shown = true;
 }
 
-void ConfigMode::on_content_image(const uint8_t *buf, size_t len, uint16_t w, uint16_t h)
+void ConfigMode::on_content_image(uint8_t slot, uint8_t fmt, const uint8_t *buf,
+                                  size_t len, uint16_t w, uint16_t h)
 {
-    // Render + persist via the mesh path (full refresh), then stop the countdown.
+    // Store + render via the mesh path, then stop the countdown from repainting.
     if (m_mesh) {
-        m_mesh->on_image(buf, len, w, h);
+        m_mesh->on_image(slot, fmt, buf, len, w, h);
+    }
+    s_content_shown = true;
+    note_activity();
+}
+
+void ConfigMode::on_screen(uint8_t idx, const char *hdr, size_t hlen,
+                           const char *body, size_t blen)
+{
+    if (m_mesh) {
+        m_mesh->on_set_screen(idx, hdr, hlen, body, blen);
+    }
+    note_activity();
+}
+
+void ConfigMode::on_display(uint8_t kind, uint8_t idx)
+{
+    if (m_mesh) {
+        m_mesh->on_display_screen(kind, idx);
     }
     s_content_shown = true;
     note_activity();
@@ -165,6 +214,11 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
     int last_shown = total_sec;
     int tick = 0;
     while (!s_exit && (k_uptime_get() - s_last_activity) < kConfigWindowMs) {
+        // Consume a mesh heartbeat/content event (set on the BT thread) here so
+        // the 64-bit s_last_activity is only ever written from the main thread.
+        if (atomic_cas(&s_heartbeat_pending, 1, 0)) {
+            note_activity();
+        }
         if (!s_content_shown) {
             int remaining = (int)((kConfigWindowMs - (k_uptime_get() - s_last_activity)) / 1000);
             if (remaining < 0) {

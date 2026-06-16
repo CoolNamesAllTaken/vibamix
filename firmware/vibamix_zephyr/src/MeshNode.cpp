@@ -1,6 +1,8 @@
 #include "MeshNode.h"
 
+#include "ConfigMode.h"
 #include "app_config.h"
+#include "badge_store.h"
 #include "identity.h"
 #include "image_xfer.h"
 #include "mesh_keys.h"
@@ -12,10 +14,15 @@
 #include <zephyr/drivers/hwinfo.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/crc.h>
 #include <zephyr/sys/printk.h>
 
 // Singleton so the file-scope C trampolines can reach the instance.
 static MeshNode *s_self;
+
+// Reassembly/staging buffer for one image at a time (2-bit gray = 11616 B, 1-bit
+// = 5808 B). image_xfer reassembles into this; display reads slots into it too.
+static uint8_t s_img_stage[12288];
 
 // Per-device provisioning UUID, derived from the FICR device id.
 static uint8_t s_dev_uuid[16];
@@ -40,17 +47,39 @@ static void cb_set_led_color(uint8_t r, uint8_t g, uint8_t b)
     if (s_self) { s_self->on_set_led_color(r, g, b); }
 }
 
-static void cb_image(const uint8_t *buf, size_t len, uint16_t w, uint16_t h)
+static void cb_image(uint8_t slot, uint8_t fmt, const uint8_t *buf, size_t len,
+                     uint16_t w, uint16_t h)
 {
-    if (s_self) { s_self->on_image(buf, len, w, h); }
+    if (s_self) { s_self->on_image(slot, fmt, buf, len, w, h); }
+}
+
+static void cb_heartbeat(void)
+{
+    config_mode_on_heartbeat();   // keep an awake badge awake
+}
+
+static void cb_set_screen(uint8_t idx, const char *hdr, size_t hlen,
+                          const char *body, size_t blen)
+{
+    if (s_self) { s_self->on_set_screen(idx, hdr, hlen, body, blen); }
+    config_mode_on_heartbeat();
+}
+
+static void cb_display(uint8_t kind, uint8_t idx)
+{
+    if (s_self) { s_self->on_display_screen(kind, idx); }
+    config_mode_on_content();     // a command screen took over; keep awake
 }
 
 } // extern "C"
 
 static const struct mesh_config_handlers s_handlers = {
-    .set_name      = cb_set_name,
-    .set_fun_fact  = cb_set_fun_fact,
-    .set_led_color = cb_set_led_color,
+    .set_name       = cb_set_name,
+    .set_fun_fact   = cb_set_fun_fact,
+    .set_led_color  = cb_set_led_color,
+    .heartbeat      = cb_heartbeat,
+    .set_screen     = cb_set_screen,
+    .display_screen = cb_display,
 };
 
 int MeshNode::init(GUI *gui, LEDStrip *leds)
@@ -60,9 +89,10 @@ int MeshNode::init(GUI *gui, LEDStrip *leds)
     s_self = this;
 
     mesh_model_set_config_handlers(&s_handlers);
-    image_xfer_init(gui->framebuffer(), gui->framebuffer_size());
+    image_xfer_init(s_img_stage, sizeof(s_img_stage));
     image_xfer_set_complete_cb(cb_image);
 
+    badge_store_init();  // open the raw images flash partition
     app_config_init();   // register the settings handler before settings_load()
 
     int err = bt_enable(nullptr);
@@ -175,12 +205,67 @@ void MeshNode::on_set_led_color(uint8_t r, uint8_t g, uint8_t b)
     }
 }
 
-void MeshNode::on_image(const uint8_t *buf, size_t len, uint16_t w, uint16_t h)
+void MeshNode::on_image(uint8_t slot, uint8_t fmt, const uint8_t *buf, size_t len,
+                        uint16_t w, uint16_t h)
 {
+    if (slot < BADGE_IMAGE_SLOTS) {
+        uint32_t crc = crc32_ieee(buf, len);
+        badge_store_image_write(slot, fmt, buf, len, w, h, crc);
+        app_config_set_display(APP_DISP_KIND_IMAGE, slot);
+    }
     if (m_gui) {
         m_gui->wake();
-        m_gui->render_image(buf, len);
+        if (fmt == BADGE_FMT_GRAY2) {
+            m_gui->render_gray2(buf, w, h);
+        } else {
+            m_gui->render_image(buf, len);
+        }
         m_gui->sleep();
     }
     app_config_set_has_image(true);
+}
+
+void MeshNode::on_set_screen(uint8_t idx, const char *hdr, size_t hlen,
+                             const char *body, size_t blen)
+{
+    app_config_set_screen(idx, hdr, hlen, body, blen);
+}
+
+void MeshNode::on_display_screen(uint8_t kind, uint8_t idx)
+{
+    if (!m_gui) {
+        return;
+    }
+
+    if (kind == APP_DISP_KIND_TEXT) {
+        const struct badge_screen *scr = app_config_get_screen(idx);
+        if (!scr) {
+            printk("display: text screen %u empty\n", idx);
+            return;
+        }
+        m_gui->wake();
+        m_gui->show_text(scr->header, scr->body);
+        m_gui->sleep();
+        app_config_set_display(kind, idx);
+        app_config_set_has_image(false);
+    } else if (kind == APP_DISP_KIND_IMAGE) {
+        uint8_t fmt;
+        size_t len;
+        uint16_t w, h;
+
+        if (badge_store_image_read(idx, s_img_stage, sizeof(s_img_stage),
+                                   &fmt, &len, &w, &h) != 0) {
+            printk("display: image slot %u empty\n", idx);
+            return;
+        }
+        m_gui->wake();
+        if (fmt == BADGE_FMT_GRAY2) {
+            m_gui->render_gray2(s_img_stage, w, h);
+        } else {
+            m_gui->render_image(s_img_stage, len);
+        }
+        m_gui->sleep();
+        app_config_set_display(kind, idx);
+        app_config_set_has_image(true);
+    }
 }

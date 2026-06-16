@@ -1,6 +1,7 @@
 #include "GUI.h"
 #include "Display_EPD_W21_spi.h"
 #include "GUI_Paint.h"
+#include "dither.h"
 #include "fonts.h"
 #include <string.h>
 #include <zephyr/sys/printk.h>
@@ -117,6 +118,14 @@ void GUI::render_image(const uint8_t *buf, size_t len)
     EPD_Display(m_image);
     EPD_Update();
     printk("ePaper image displayed\n");
+}
+
+void GUI::render_gray2(const uint8_t *src, uint16_t w, uint16_t h)
+{
+    dither_2bit_to_fb(src, w, h, m_image);
+    EPD_Display(m_image);
+    EPD_Update();
+    printk("ePaper grayscale image displayed\n");
 }
 
 void GUI::set_base_map()

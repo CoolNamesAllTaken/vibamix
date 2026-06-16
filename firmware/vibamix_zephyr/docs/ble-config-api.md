@@ -1,8 +1,10 @@
 # Vibamix Badge — BLE Configuration API
 
 This document specifies the Bluetooth Low Energy interface a **configuration app** uses to set up a
-vibamix badge: connect to a specific badge, set the attendee **name**, and upload a hand-drawn
-**badge image** to the e‑paper screen.
+vibamix badge: connect to a specific badge, set the attendee **name**, upload hand‑drawn **badge
+images** (B/W or grayscale) into **4 storage slots**, store up to **20 text screens**, and command
+which stored screen the badge displays. It also covers the event‑wide **mesh** control path
+(broadcast display/screen commands + the keep‑awake heartbeat).
 
 It is a complete handoff spec — you should not need the firmware source to implement the app.
 
@@ -69,10 +71,14 @@ Notes:
 
 | Characteristic | UUID | Properties | Payload |
 |----------------|------|-----------|---------|
-| **Name**  | `f0de0003-4b1c-4e2a-9a11-a1b2c3d4e5f6` | Write | UTF‑8 string, **≤ 31 bytes** (longer is truncated). Sets the attendee name and redraws the identity screen. |
-| **Image** | `f0de0002-4b1c-4e2a-9a11-a1b2c3d4e5f6` | Write, Write‑Without‑Response | Framed image-upload commands (see §5). |
+| **Name**  | `f0de0003-…` | Write | UTF‑8 string, **≤ 31 bytes**. Sets the attendee name and redraws the identity screen. |
+| **Image** | `f0de0002-…` | Write, Write‑Without‑Response | Render-only 1‑bit image upload (see §5). Does **not** persist to a slot. |
+| **Screen** | `f0de0004-…` | Write | Store one of **20 text screens** (header + body), framed (see §7). |
+| **Image‑slot** | `f0de0005-…` | Write, Write‑Without‑Response | Upload an image into one of **4 stored slots**, 1‑bit B/W or 2‑bit grayscale (see §8). |
+| **Display** | `f0de0006-…` | Write | Show a stored screen: `u8 kind, u8 idx` (see §9). |
 
-All multi‑byte integers in payloads are **little‑endian**.
+(All UUIDs share the base `…-4b1c-4e2a-9a11-a1b2c3d4e5f6`.) All multi‑byte integers in payloads are
+**little‑endian**.
 
 There is **no notify/indicate** characteristic — the badge does not send a status back. Success is
 visible on the e‑paper screen (and the badge logs to its UART). See §7 for the implication.
@@ -219,7 +225,76 @@ black/white (e.g. luminance < 128 → black) → `packFramebuffer`.
 
 ---
 
-## 7. Limitations & gotchas (please read)
+## 7. Text screens (stored content)
+
+The badge stores **20 text screens**, indexed `0…19`, each a **header** (≤ 47 bytes) and a
+**body** (≤ 1023 bytes, word‑wrapped on the badge). Screens persist across power cycles. Set one by
+writing a framed stream to the **Screen** characteristic (`f0de0004`):
+
+| Opcode | Payload | Meaning |
+|-------:|---------|---------|
+| `0x01` START | `u8 idx`, `u8 hlen`, `hlen` header bytes | Begin screen `idx`; carries the full header. |
+| `0x02` DATA  | `u16 offset`, body bytes | Body bytes at `offset` (chunk for bodies > one MTU). |
+| `0x03` END   | — | Commit (store header + accumulated body). |
+
+The body is reassembled by offset (like an image), so cover `0…blen‑1`; short bodies can be a single
+DATA at offset 0. Setting a screen only **stores** it — use **Display** (§9) to show it.
+
+---
+
+## 8. Image slots (4 stored images, B/W or grayscale)
+
+The badge stores **4 full‑screen image slots**, indexed `0…3`. Each slot is either:
+- **1‑bit B/W** (`format = 1`) — the panel‑native 5808‑byte framebuffer (§6 packing). Displayed by a
+  direct blit (crisp; pre‑dither on the host for best art).
+- **2‑bit grayscale** (`format = 2`) — a 11,616‑byte image the badge **dithers to B/W** on display
+  (the panel is physically 1‑bit, so grayscale is approximated with an ordered dither).
+
+Upload to the **Image‑slot** characteristic (`f0de0005`), same framing as §5 but START carries the
+slot and format:
+
+| Opcode | Payload | Meaning |
+|-------:|---------|---------|
+| `0x01` START | `u8 slot`, `u8 format`, `u16 size`, `u16 width`, `u16 height` | Begin upload to `slot` (0–3). B/W: `size=5808`, `width=176`, `height=264`. Gray: `size=11616`, **`width=264`, `height=176`** (the landscape packing stride — the dither reads `pixel_index = dy*width + dx`). |
+| `0x02` DATA  | `u16 offset`, image bytes | As §5. |
+| `0x03` END   | `u32 crc32` | CRC‑32/IEEE over the whole image; on success the slot is stored **and** displayed. |
+
+**2‑bit packing.** Author on the same 264 × 176 landscape canvas as §6. Pack **4 pixels per byte,
+MSB‑first, row‑major**: `pixel_index = dy*264 + dx`; the 2‑bit level lives in bits
+`[7:6],[5:4],[3:2],[1:0]` of byte `pixel_index >> 2`. Level **0 = black … 3 = white**. Total
+= 264·176·2/8 = **11,616 bytes**.
+
+> Images are **local‑GATT only** — they are never sent over the mesh (too large to flood).
+
+---
+
+## 9. Displaying a stored screen
+
+Write 2 bytes to the **Display** characteristic (`f0de0006`): `u8 kind, u8 idx`.
+- `kind = 0` → **text screen** `idx` (0–19). Renders its header + wrapped body.
+- `kind = 1` → **image slot** `idx` (0–3). Blits (B/W) or dithers (grayscale) the stored image.
+
+The selection persists, and the rendered screen takes over the panel (the config countdown stops
+repainting). Displaying an empty slot/screen is a no‑op.
+
+---
+
+## 10. Mesh control & heartbeat (event‑wide)
+
+Separately from the per‑badge GATT path, an event controller can broadcast over the **mesh** to all
+badges at once. Mesh‑reachable commands: **set name**, **set text screen**, **display screen**.
+**Image uploads are GATT‑only.** Mesh text/display delivery is **best‑effort** (unacked flooding) —
+use GATT when you need a guaranteed result.
+
+**Heartbeat:** the controller sends an *event heartbeat* mesh message about **once a minute**. A
+badge that is **already awake** resets its ~3‑minute window on each heartbeat, so it stays awake to
+receive commands for as long as heartbeats continue. A heartbeat **cannot wake a sleeping badge**
+(its radio is off in deep sleep) — the attendee still wakes it with the button; heartbeats only
+keep an open window open.
+
+---
+
+## 11. Limitations & gotchas (please read)
 
 - **No success/failure response.** The Config Service has no notify characteristic, so the app
   cannot read back whether the CRC passed. Treat a completed write sequence as "sent," and tell the
@@ -237,21 +312,36 @@ black/white (e.g. luminance < 128 → black) → `packFramebuffer`.
 
 ---
 
-## 8. Quick reference
+## 12. Quick reference
 
 ```
 Device name (advertised in config mode): vibamix-<CODE>   e.g. vibamix-1A2F
 QR URL:                                  https://<host>/?id=<CODE>
 
-Service  f0de0001-4b1c-4e2a-9a11-a1b2c3d4e5f6
-  Name   f0de0003-4b1c-4e2a-9a11-a1b2c3d4e5f6   write UTF-8, <=31 bytes
-  Image  f0de0002-4b1c-4e2a-9a11-a1b2c3d4e5f6   write / write-no-response
+Service     f0de0001-…   (base …-4b1c-4e2a-9a11-a1b2c3d4e5f6)
+  Name      f0de0003-…   write UTF-8, <=31 bytes
+  Image     f0de0002-…   write / write-no-response  (render-only 1bpp)
+  Screen    f0de0004-…   write  (store text screen)
+  Image-slot f0de0005-…  write / write-no-response  (store image slot)
+  Display   f0de0006-…   write  u8 kind, u8 idx
 
-Image command frames (little-endian):
-  START 0x01 | u16 size(=5808) | u16 width(=176) | u16 height(=264)
-  DATA  0x02 | u16 offset      | bytes...
-  END   0x03 | u32 crc32(IEEE over all 5808 bytes)
+Image (f0de0002) / Image-slot (f0de0005) frames (little-endian):
+  Image      START 0x01 | u16 size(=5808) | u16 w(=176) | u16 h(=264)
+  Image-slot START 0x01 | u8 slot(0-3) | u8 format(1=BW 5808 / 2=gray2 11616) | u16 size | u16 w | u16 h
+             DATA  0x02 | u16 offset | bytes...
+             END   0x03 | u32 crc32(IEEE over all image bytes)
 
-Framebuffer: 5808 bytes = 264 rows x 22 bytes, MSB=leftmost, bit 1=white / 0=black.
-Pack landscape (dx∈0..263, dy∈0..175): idx = (263-dx)*22 + (dy>>3); mask = 0x80>>(dy&7).
+Screen (f0de0004) frames:
+  START 0x01 | u8 idx(0-19) | u8 hlen | header bytes
+  DATA  0x02 | u16 offset | body bytes
+  END   0x03
+
+Display (f0de0006):  u8 kind(0=text screen,1=image slot) | u8 idx
+
+1bpp framebuffer: 5808 bytes = 264 rows x 22 bytes, MSB=leftmost, bit 1=white / 0=black.
+  Pack landscape (dx∈0..263, dy∈0..175): idx = (263-dx)*22 + (dy>>3); mask = 0x80>>(dy&7).
+2-bit grayscale: 11616 bytes, 4 px/byte MSB-first, pixel_index=dy*264+dx, level 0=black..3=white.
+
+Mesh (event-wide broadcast): set-name, set-screen, display-screen (best-effort); image = GATT only.
+  Heartbeat (~60s) keeps an already-awake badge awake; cannot wake a sleeping badge.
 ```

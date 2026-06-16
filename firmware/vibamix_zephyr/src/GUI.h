@@ -20,6 +20,10 @@ public:
     // itself (image_xfer reassembles straight into it), so no copy is needed.
     void render_image(const uint8_t *buf, size_t len);
 
+    // Dither a 2-bit grayscale image (landscape-packed, w<=264 h<=176) into the
+    // framebuffer and display it.
+    void render_gray2(const uint8_t *src, uint16_t w, uint16_t h);
+
     void sleep();
 
     // Full refresh that also sets the partial-refresh baseline (both RAM banks),

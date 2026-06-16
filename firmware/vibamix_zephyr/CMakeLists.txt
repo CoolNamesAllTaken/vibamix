@@ -24,6 +24,8 @@ target_sources(app PRIVATE
   src/config_gatt.c
   src/ConfigMode.cpp
   src/battery.c
+  src/badge_store.c
+  src/dither.c
 )
 
 add_subdirectory(../peripherals/epd epd)
