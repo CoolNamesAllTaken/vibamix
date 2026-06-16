@@ -102,7 +102,11 @@ static void led_boot_sequence(void)
 		s_leds.render();
 		k_sleep(K_MSEC(500));
 	}
-	s_leds.off();
+	// Blank the chain but leave the power gate on — it also feeds the ALS
+	// sensor, which still needs power through the boot screen update below.
+	// s_leds.off() (later, once the awake window ends) cuts the gate for real.
+	s_leds.set_pattern(LedPattern::Off);
+	s_leds.render();
 }
 
 static void update_display(void)
