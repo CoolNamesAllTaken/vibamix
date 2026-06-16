@@ -1,15 +1,17 @@
 #include <dt-bindings/pinctrl/nrf-pinctrl.h>
 
 &pinctrl {
-	/* ePaper display SPI bus - MISO omitted, display is write-only */
-	spi20_default: spi20_default {
+	/* ePaper display on SPI00 - MISO omitted, display is write-only.
+	 * Moved from spi20 so SERIAL20 is free for i2c20 (ALS sensor).
+	 */
+	spi00_default: spi00_default {
 		group1 {
 			psels = <NRF_PSEL(SPIM_SCK,  2, 1)>,	/* P2.01 SPI_CLK  */
 				<NRF_PSEL(SPIM_MOSI, 2, 2)>;	/* P2.02 SPI_MOSI */
 		};
 	};
 
-	spi20_sleep: spi20_sleep {
+	spi00_sleep: spi00_sleep {
 		group1 {
 			psels = <NRF_PSEL(SPIM_SCK,  2, 1)>,
 				<NRF_PSEL(SPIM_MOSI, 2, 2)>;
@@ -17,21 +19,22 @@
 		};
 	};
 
-	/* WS2812 LED strip on SPI00 - SCK routed to NC P1.05, only MOSI (DIN) is wired */
-	spi00_default: spi00_default {
+	/* WS2812 LED strip on SPI21 - SCK routed to NC P1.05, only MOSI (DIN) is wired */
+	spi21_default: spi21_default {
 		group1 {
-			psels = <NRF_PSEL(SPIM_MOSI, 1, 6)>,	/* P1.06 LED_DIN  */
-				<NRF_PSEL(SPIM_SCK,  1, 5)>;	/* P1.05 NC       */
+			psels = <NRF_PSEL(SPIM_MOSI, 1, 6)>,	/* P1.06 LED_DIN */
+				<NRF_PSEL(SPIM_SCK,  1, 5)>;	/* P1.05 NC      */
 		};
 	};
 
-	spi00_sleep: spi00_sleep {
+	spi21_sleep: spi21_sleep {
 		group1 {
 			psels = <NRF_PSEL(SPIM_MOSI, 1, 6)>,
 				<NRF_PSEL(SPIM_SCK,  1, 5)>;
 			low-power-enable;
 		};
 	};
+
 
 	/* UART22 - logging */
 	uart22_default: uart22_default {
@@ -49,8 +52,8 @@
 		};
 	};
 
-	/* Light sensor I2C bus */
-	i2c21_default: i2c21_default {
+	/* Light sensor I2C bus on SERIAL20 (free now that ePaper moved to spi00) */
+	i2c20_default: i2c20_default {
 		group1 {
 			psels = <NRF_PSEL(TWIM_SDA, 1, 10)>,	/* P1.10 LIGHT_SENSOR_SDA */
 				<NRF_PSEL(TWIM_SCL, 1, 11)>;	/* P1.11 LIGHT_SENSOR_SCL */
@@ -58,7 +61,7 @@
 		};
 	};
 
-	i2c21_sleep: i2c21_sleep {
+	i2c20_sleep: i2c20_sleep {
 		group1 {
 			psels = <NRF_PSEL(TWIM_SDA, 1, 10)>,
 				<NRF_PSEL(TWIM_SCL, 1, 11)>;

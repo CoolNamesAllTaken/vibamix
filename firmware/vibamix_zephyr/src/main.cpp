@@ -10,6 +10,7 @@
 
 #include "GUI.h"
 #include "BLERadio.h"
+#include "LEDStrip.h"
 #include "ambient_light_sensor.h"
 
 
@@ -22,12 +23,28 @@ static struct gpio_callback btn_cb_data;
 // Static globals keep the 5808-byte image buffer in .bss, not the main stack.
 static GUI      s_gui;
 static BLERadio s_ble;
+static LEDStrip s_leds;
 
 K_SEM_DEFINE(s_btn_sem, 0, 1);
 
 static void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
 	k_sem_give(&s_btn_sem);
+}
+
+static void led_boot_sequence(void)
+{
+	static const struct { uint8_t r, g, b; } k_colors[] = {
+		{255,   0,   0},  // red
+		{  0, 255,   0},  // green
+		{  0,   0, 255},  // blue
+		{255, 255, 255},  // white
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(k_colors); i++) {
+		s_leds.set(k_colors[i].r, k_colors[i].g, k_colors[i].b);
+		k_sleep(K_MSEC(500));
+	}
+	s_leds.off();
 }
 
 static void update_display(void)
@@ -44,8 +61,12 @@ int main(void)
 
 	gpio_pin_configure_dt(&led_enable, GPIO_OUTPUT_ACTIVE);
 
+	s_leds.init();
+	ambient_light_sensor_start();  // start early — 2s boot sequence gives ALS time to get first reading
+	led_boot_sequence();
+
 	s_gui.init();
-	ambient_light_sensor_start();
+	update_display();              // show ALS reading immediately on boot
 
 	if (!gpio_is_ready_dt(&user_led))
 	{

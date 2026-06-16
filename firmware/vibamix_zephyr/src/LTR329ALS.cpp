@@ -106,3 +106,5 @@ int ltr329als_read(uint16_t *ch0, uint16_t *ch1, ltr329als_gain *active_gain) {
   *ch0 = (uint16_t)ch0_low | ((uint16_t)ch0_high << 8);
   return 0;
 }
+
+
