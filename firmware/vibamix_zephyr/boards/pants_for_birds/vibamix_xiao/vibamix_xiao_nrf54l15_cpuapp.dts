@@ -133,7 +133,7 @@
 	};
 };
 
-/* ALS sensor on SERIAL20 — free now that ePaper moved to spi00 */
+/* ALS sensor on SERIAL20 */
 &i2c20 {
 	compatible = "nordic,nrf-twim";
 	status = "okay";
