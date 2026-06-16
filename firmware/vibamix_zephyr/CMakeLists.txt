@@ -24,10 +24,8 @@ target_sources(app PRIVATE
   src/config_gatt.c
   src/ConfigMode.cpp
   src/battery.c
-  src/BLERadio.cpp
   src/LTR329ALS.cpp
   src/ambient_light_sensor.cpp
-  src/LEDStrip.cpp
 )
 
 add_subdirectory(../peripherals/epd epd)
