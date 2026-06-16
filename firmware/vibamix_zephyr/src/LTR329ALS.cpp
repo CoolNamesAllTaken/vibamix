@@ -31,6 +31,138 @@ LOG_MODULE_REGISTER(ltr329als, LOG_LEVEL_INF);
 #define ALS_STATUS_INVALID BIT(7)  // 1 = data invalid (0 = valid)
 
 static const struct i2c_dt_spec s_i2c = I2C_DT_SPEC_GET(ALS_NODE);
+static ltr329als_integ_time s_integ_time = LTR329ALS_INTEG_100MS;
+
+static const ltr329als_gain k_gain_seq[] = {
+    LTR329ALS_GAIN_1X, LTR329ALS_GAIN_2X, LTR329ALS_GAIN_4X,
+    LTR329ALS_GAIN_8X,   // index 3 — default start
+    LTR329ALS_GAIN_48X, LTR329ALS_GAIN_96X,
+};
+#define GAIN_SEQ_LEN     ARRAY_SIZE(k_gain_seq)
+#define GAIN_START_IDX   3
+#define AUTOGAIN_HIGH    52000
+#define AUTOGAIN_LOW     1000
+#define AUTOGAIN_LOW_CONSEC 3
+
+static int s_gain_idx  = GAIN_START_IDX;
+static int s_low_count = 0;
+
+static int apply_gain(ltr329als_gain g) {
+  uint8_t contr = ((uint8_t)g << 2) | 0x01;
+  return i2c_reg_write_byte_dt(&s_i2c, REG_ALS_CONTR, contr);
+}
+
+uint32_t ltr329als_gain_factor(ltr329als_gain g) {
+  switch (g) {
+  case LTR329ALS_GAIN_1X:  return 1;
+  case LTR329ALS_GAIN_2X:  return 2;
+  case LTR329ALS_GAIN_4X:  return 4;
+  case LTR329ALS_GAIN_8X:  return 8;
+  case LTR329ALS_GAIN_48X: return 48;
+  case LTR329ALS_GAIN_96X: return 96;
+  default:                  return 1;
+  }
+}
+
+static float integ_factor(ltr329als_integ_time t) {
+  switch (t) {
+  case LTR329ALS_INTEG_50MS:  return 0.5f;
+  case LTR329ALS_INTEG_100MS: return 1.0f;
+  case LTR329ALS_INTEG_150MS: return 1.5f;
+  case LTR329ALS_INTEG_200MS: return 2.0f;
+  case LTR329ALS_INTEG_250MS: return 2.5f;
+  case LTR329ALS_INTEG_300MS: return 3.0f;
+  case LTR329ALS_INTEG_350MS: return 3.5f;
+  case LTR329ALS_INTEG_400MS: return 4.0f;
+  default:                    return 1.0f;
+  }
+}
+
+uint32_t ltr329als_compute_lux(uint16_t ch0, uint16_t ch1,
+                                ltr329als_gain active_gain,
+                                ltr329als_integ_time integ_time) {
+  if (ch0 == 0 && ch1 == 0) {
+    return 0;
+  }
+  uint32_t gain_f = ltr329als_gain_factor(active_gain);
+  float integ_f   = integ_factor(integ_time);
+  float ratio = (float)ch1 / ((float)ch0 + (float)ch1);
+  float lux;
+  if (ratio < 0.45f) {
+    lux = (1.7743f * ch0 + 1.1059f * ch1) / gain_f / integ_f;
+  } else if (ratio < 0.64f) {
+    lux = (4.2785f * ch0 - 1.9548f * ch1) / gain_f / integ_f;
+    if (lux < 0.0f) lux = 0.0f;
+  } else if (ratio < 0.85f) {
+    lux = (0.5926f * ch0 + 0.1185f * ch1) / gain_f / integ_f;
+  } else {
+    lux = 0.0f;
+  }
+  return (uint32_t)(lux + 0.5f);
+}
+
+int ltr329als_read_lux(struct ltr329als_sample *out) {
+  uint16_t ch0 = 0, ch1 = 0;
+  ltr329als_gain active_gain;
+  int ret = ltr329als_read(&ch0, &ch1, &active_gain);
+
+  if (ret == -EAGAIN) {
+    return -EAGAIN;
+  }
+  if (ret == -ERANGE) {
+    ltr329als_autogain(ret, 0);
+    return -ENODATA;
+  }
+  if (ret != 0) {
+    return ret;
+  }
+  if (ltr329als_autogain(ret, ch0)) {
+    return -ENODATA;
+  }
+
+  out->ch0  = ch0;
+  out->ch1  = ch1;
+  out->gain = ltr329als_gain_factor(active_gain);
+  out->lux  = ltr329als_compute_lux(ch0, ch1, active_gain, s_integ_time);
+  return 0;
+}
+
+ltr329als_gain ltr329als_current_gain(void) {
+  return k_gain_seq[s_gain_idx];
+}
+
+bool ltr329als_autogain(int read_ret, uint16_t ch0) {
+  if (read_ret == -ERANGE) {
+    if (s_gain_idx > 0) {
+      s_low_count = 0;
+      apply_gain(k_gain_seq[--s_gain_idx]);
+      LOG_INF("Auto-gain down (saturated): step %d", s_gain_idx);
+      return true;
+    }
+    return false;
+  }
+  if (read_ret != 0) {
+    return false;
+  }
+  if (ch0 > AUTOGAIN_HIGH && s_gain_idx > 0) {
+    s_low_count = 0;
+    apply_gain(k_gain_seq[--s_gain_idx]);
+    LOG_INF("Auto-gain down (high): step %d", s_gain_idx);
+    return true;
+  }
+  if (ch0 < AUTOGAIN_LOW) {
+    if (++s_low_count >= AUTOGAIN_LOW_CONSEC &&
+        s_gain_idx < (int)GAIN_SEQ_LEN - 1) {
+      s_low_count = 0;
+      apply_gain(k_gain_seq[++s_gain_idx]);
+      LOG_INF("Auto-gain up: step %d", s_gain_idx);
+      return true;
+    }
+  } else {
+    s_low_count = 0;
+  }
+  return false;
+}
 
 int ltr329als_init(const struct ltr329als_config *cfg) {
   if (!device_is_ready(s_i2c.bus)) {
@@ -65,6 +197,8 @@ int ltr329als_init(const struct ltr329als_config *cfg) {
     LOG_ERR("Failed to write ALS_CONTR: %d", ret);
     return ret;
   }
+
+  s_integ_time = cfg->integ_time;
 
   // Allow first measurement to complete (worst-case 400ms integration + margin)
   k_msleep(410);

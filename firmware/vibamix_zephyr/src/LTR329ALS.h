@@ -44,10 +44,33 @@ struct ltr329als_config {
 // Returns 0 on success, negative errno on failure.
 int ltr329als_init(const struct ltr329als_config *cfg);
 
-
 // Read raw ADC counts from both channels.
 // ch0: visible + IR light (primary channel for lux estimation)
 // ch1: IR-only light
 // active_gain: actual gain the sensor used for this measurement (from ALS_STATUS [6:4])
 // Returns 0 on success, -EAGAIN if no new data, -ERANGE if saturated, negative errno on error.
 int ltr329als_read(uint16_t *ch0, uint16_t *ch1, ltr329als_gain *active_gain);
+
+struct ltr329als_sample {
+    uint32_t lux;
+    uint32_t gain;  // integer multiplier (1, 2, 4, 8, 48, or 96)
+    uint16_t ch0;
+    uint16_t ch1;
+};
+
+// Read the sensor, adjust gain if needed, and compute lux — all in one call.
+// Returns 0 with *out filled on a valid reading.
+// Returns -EAGAIN if no new data is ready yet.
+// Returns -ENODATA if gain was just adjusted (sample is stale; retry next cycle).
+// Returns negative errno on hard I2C error.
+int ltr329als_read_lux(struct ltr329als_sample *out);
+
+// Examine a read result and adjust the sensor gain register if needed.
+// Pass the return value from ltr329als_read() and the ch0 count.
+// Handles -ERANGE (hardware saturation) and high/low count thresholds.
+// Returns true if gain was changed — caller should skip this sample.
+bool ltr329als_autogain(int read_ret, uint16_t ch0);
+
+// Returns the gain currently selected by the auto-gain controller.
+// Use when re-initializing after a hard error so the config matches internal state.
+ltr329als_gain ltr329als_current_gain(void);
