@@ -69,8 +69,27 @@ void EPD_SetBaseMap(const unsigned char *Image)
 // and runs the partial waveform. Requires a prior EPD_SetBaseMap().
 void EPD_Display_Partial(const unsigned char *Image)
 {
+	// Re-enter partial mode the way the vendor's EPD_Dis_Part does: a reset pulse +
+	// the partial BorderWaveform (0x3C=0x80) + reset the RAM address counters.
+	// Without this, the SSD1680 runs the partial waveform with the full-refresh
+	// border/VCOM still configured and washes the whole panel out on the FIRST
+	// partial (it does NOT accumulate over many refreshes — it's a missing setup).
+	EPD_W21_RST_0; // Module reset
+	delay_xms(10);
+	EPD_W21_RST_1;
+	delay_xms(10);
+
+	Epaper_Write_Command(0x3C); // BorderWaveform
+	Epaper_Write_Data(0x80);    // partial-mode border
+
+	Epaper_Write_Command(0x4E); // RAM x address counter = 0
+	Epaper_Write_Data(0x00);
+	Epaper_Write_Command(0x4F); // RAM y address counter = 0
+	Epaper_Write_Data(0x00);
+	Epaper_Write_Data(0x00);
+
 	Epaper_Write_Command(0x24);
-	Epaper_Write_RowReversed(Image);
+	Epaper_Write_RowReversed(Image); // same packing as EPD_Display/EPD_SetBaseMap
 	EPD_Part_Update();
 }
 
