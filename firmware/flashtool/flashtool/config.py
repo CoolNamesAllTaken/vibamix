@@ -22,6 +22,11 @@ WEST_APP_DIR: Path = Path(__file__).parent.parent.parent / "vibamix_zephyr"
 BOARD: str = "vibamix_xiao/nrf54l15/cpuapp"
 BUILD_DIR: Path = WEST_APP_DIR / "build"
 
+# First-stage direct-XIP bootloader: a separate Zephyr app linked at 0x0, built
+# into its own dir under the app build tree (see builder.build_bootloader).
+BOOTLOADER_SRC_DIR: Path = WEST_APP_DIR.parent / "bootloader"
+BOOTLOADER_BUILD_DIR: Path = BUILD_DIR / "bl"
+
 # Resolved at import time from toolchains.json; falls back to the first
 # toolchain dir found under NCS_BASE/toolchains/.
 def _find_toolchain_dir() -> Path:
@@ -46,10 +51,13 @@ def _find_toolchain_dir() -> Path:
 NCS_TOOLCHAIN_DIR: Path = _find_toolchain_dir()
 
 # --- Firmware artifacts ------------------------------------------------------
-# Hex produced by ``west build``.  Override if you flash pre-built artifacts
-# from a different location.
-ARTIFACT_DIR: Path = BUILD_DIR / "vibamix_zephyr" / "zephyr"
+# A factory board needs BOTH images flashed over SWD (custom direct-XIP A/B
+# bootloader, no MCUboot): the bootloader at 0x0 and the app linked into slot A
+# at 0xE000.  These are the plain ``west build`` outputs for each.
+ARTIFACT_DIR: Path = BUILD_DIR / "zephyr"             # app build output dir
 FIRMWARE_GLOB: str = "zephyr.hex"
+APP_HEX: Path = ARTIFACT_DIR / "zephyr.hex"           # app, slot A @ 0xE000
+BOOTLOADER_HEX: Path = BOOTLOADER_BUILD_DIR / "zephyr" / "zephyr.hex"  # BL @ 0x0
 CHIP: str = "nRF54L15"
 
 # --- Flashing backend (probe-rs over the XIAO onboard CMSIS-DAP) -------------

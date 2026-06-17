@@ -52,6 +52,10 @@ UUID_CHR_DISPLAY = _u(0x0006)    # show stored screen
 # (0x0007 attendee, 0x0008 per-frame LED — firmware-side; not used by badgectl yet)
 UUID_CHR_OTA = _u(0x0009)        # firmware OTA update (trailered direct-XIP image)
 UUID_CHR_OTA_STATUS = _u(0x000A)  # read: active_slot, inactive_slot, le32 version
+UUID_CHR_KEEPALIVE = _u(0x000B)  # write (app->badge) + notify (badge->app), 1 Hz liveness
+UUID_CHR_CFG_SNAPSHOT = _u(0x000C)  # read: overview of stored config
+UUID_CHR_SCREEN_READ = _u(0x000D)   # write idx to select, read: that screen's header+body
+UUID_CHR_IMAGE_READ = _u(0x000E)    # write slot to select, read: that slot's pixels
 
 # OTA slots (direct-XIP A/B). Mirror BL_SLOT_* in firmware/common/bl_state.h.
 OTA_SLOT_A = 0

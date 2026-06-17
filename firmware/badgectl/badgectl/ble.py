@@ -54,8 +54,70 @@ async def scan(timeout: float = 8.0) -> list[Found]:
     return sorted(out.values(), key=lambda f: f.name)
 
 
+class Scanner:
+    """Continuous background scan. Calls `on_update(addr, name, rssi, is_proxy,
+    device)` for every advertisement from a vibamix badge until stopped — feeds a
+    live device table (scales to hundreds)."""
+
+    def __init__(self, on_update) -> None:
+        self._on_update = on_update
+        self._scanner: BleakScanner | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._scanner is not None
+
+    async def start(self) -> None:
+        if self._scanner is not None:
+            return
+
+        def cb(dev, adv):
+            f = _match(dev, adv)
+            if f is not None:
+                self._on_update(f.address, f.name, adv.rssi, f.is_proxy, dev)
+
+        self._scanner = BleakScanner(detection_callback=cb)
+        await self._scanner.start()
+
+    async def stop(self) -> None:
+        if self._scanner is not None:
+            try:
+                await self._scanner.stop()
+            finally:
+                self._scanner = None
+
+
 def _le16(v: int) -> bytes:
     return bytes([v & 0xFF, (v >> 8) & 0xFF])
+
+
+def _get_str(v: bytes, o: int) -> tuple[str, int]:
+    """Read a u8-length-prefixed UTF-8 string at offset o; return (str, next_offset)."""
+    n = v[o]
+    return v[o + 1 : o + 1 + n].decode("utf-8", "replace"), o + 1 + n
+
+
+OTA_MAGIC = b"VOTA"
+
+
+def parse_ota(data: bytes) -> tuple[int, dict[int, bytes]]:
+    """Parse a `.ota` bundle (scripts/pack_ota.py). Returns (app_version, {slot: image}).
+
+    Layout: magic "VOTA", u16 format, u16 slot_count, u32 version, u32 reserved,
+    then slot_count x {u8 slot, u8[3] pad, u32 offset, u32 length}, then payloads.
+    """
+    if len(data) < 16 or data[:4] != OTA_MAGIC:
+        raise ValueError("not a .ota bundle (bad magic)")
+    fmt, slot_count, version, _rsvd = struct.unpack_from("<HHII", data, 4)
+    if fmt != 1:
+        raise ValueError(f"unsupported .ota format version {fmt}")
+    images: dict[int, bytes] = {}
+    for i in range(slot_count):
+        slot, off, length = struct.unpack_from("<BxxxII", data, 16 + 12 * i)
+        if off + length > len(data):
+            raise ValueError(f".ota slot {slot} entry exceeds file size")
+        images[slot] = data[off : off + length]
+    return version, images
 
 
 class BadgeLink:
@@ -75,19 +137,19 @@ class BadgeLink:
         except Exception:
             return 23
 
-    async def connect(self, target) -> None:
+    async def connect(self, target, on_disconnect=None) -> None:
         # On macOS you must connect by a live BLEDevice, not a bare address — a
         # stale/address-only handle raises BleakDeviceNotFoundError. Re-resolve a
         # fresh handle right before connecting; fall back to the scanned one.
         if isinstance(target, Found):
             address, device = target.address, target.device
         else:
-            address, device = str(target), None
+            address, device = str(target), getattr(target, "device", None)
         fresh = await BleakScanner.find_device_by_address(address, timeout=8.0)
         dev = fresh or device
         if dev is None:
             raise BleakDeviceNotFoundError(address, f"Device {address} is not advertising")
-        self.client = BleakClient(dev, timeout=15.0)
+        self.client = BleakClient(dev, timeout=15.0, disconnected_callback=on_disconnect)
         await self.client.connect()
         # Subscribe proxy Data-Out so the node keeps the proxy link active; ignore RX.
         try:
@@ -153,6 +215,71 @@ class BadgeLink:
     async def display(self, kind: int, idx: int) -> None:
         await self._w(keys.UUID_CHR_DISPLAY, bytes([kind, idx]))
 
+    # --- read back the badge's stored config ---
+    async def read_config_snapshot(self) -> dict:
+        """Overview of stored config from f0de000C (name/fact/attendee/color/display,
+        screen titles + presence, image-slot presence)."""
+        assert self.client is not None
+        v = await self.client.read_gatt_char(keys.UUID_CHR_CFG_SNAPSHOT)
+        o = 0
+        name, o = _get_str(v, o)
+        fact, o = _get_str(v, o)
+        attendee, o = _get_str(v, o)
+        has_color, r, g, b = v[o], v[o + 1], v[o + 2], v[o + 3]
+        o += 4
+        has_disp, disp_kind, disp_idx = v[o], v[o + 1], v[o + 2]
+        o += 3
+        scount = v[o]
+        o += 1
+        screens = []
+        for _ in range(scount):
+            present, hlen = v[o], v[o + 1]
+            o += 2
+            title = v[o : o + hlen].decode("utf-8", "replace")
+            o += hlen
+            screens.append({"present": bool(present), "title": title})
+        slcount = v[o]
+        o += 1
+        slots = [{"present": bool(v[o + i])} for i in range(slcount)]
+        return {
+            "name": name,
+            "fun_fact": fact,
+            "attendee": attendee,
+            "color": {"has": bool(has_color), "r": r, "g": g, "b": b},
+            "display": {"has": bool(has_disp), "kind": disp_kind, "idx": disp_idx},
+            "screens": screens,
+            "slots": slots,
+        }
+
+    async def read_screen(self, idx: int) -> dict:
+        """Full header+body of stored text screen `idx` (select-write then read f0de000D)."""
+        assert self.client is not None
+        await self._w(keys.UUID_CHR_SCREEN_READ, bytes([idx]))
+        v = await self.client.read_gatt_char(keys.UUID_CHR_SCREEN_READ)
+        if not v or v[0] == 0:
+            return {"present": False, "header": "", "body": ""}
+        hlen = v[1]
+        o = 2
+        header = v[o : o + hlen].decode("utf-8", "replace")
+        o += hlen
+        blen = int.from_bytes(v[o : o + 2], "little")
+        o += 2
+        body = v[o : o + blen].decode("utf-8", "replace")
+        return {"present": True, "header": header, "body": body}
+
+    async def read_image(self, slot: int) -> dict:
+        """Raw pixels + format of stored image slot (select-write then read f0de000E)."""
+        assert self.client is not None
+        await self._w(keys.UUID_CHR_IMAGE_READ, bytes([slot]))
+        v = await self.client.read_gatt_char(keys.UUID_CHR_IMAGE_READ)
+        if len(v) < 8 or v[0] == 0:
+            return {"present": False}
+        fmt = v[1]
+        w = int.from_bytes(v[2:4], "little")
+        h = int.from_bytes(v[4:6], "little")
+        ln = int.from_bytes(v[6:8], "little")
+        return {"present": True, "fmt": fmt, "w": w, "h": h, "pixels": bytes(v[8 : 8 + ln])}
+
     # --- firmware OTA (trailered direct-XIP image -> inactive slot) ---
     async def read_ota_status(self) -> tuple[int, int, int]:
         """Return (active_slot, inactive_slot, active_version) from f0de000A."""
@@ -180,10 +307,25 @@ class BadgeLink:
         await self.ota_update(path, on_progress)
         return inactive
 
+    async def ota_update_file(self, ota_path: str, on_progress=None) -> tuple[int, int]:
+        """Flash from a single `.ota` bundle: read which slot is inactive on the
+        badge, extract that slot's image from the bundle, and stream it. Returns
+        (slot_flashed, app_version)."""
+        with open(ota_path, "rb") as f:
+            version, images = parse_ota(f.read())
+        _active, inactive, _ver = await self.read_ota_status()
+        img = images.get(inactive)
+        if img is None:
+            raise RuntimeError(f".ota bundle has no image for the badge's inactive slot {inactive}")
+        await self._ota_stream(img, on_progress)
+        return inactive, version
+
     async def ota_update(self, path: str, on_progress=None) -> None:
-        """Stream a trailered slot image (raw image + 32-byte CRC trailer)."""
+        """Stream a single trailered slot image file (raw image + 32-byte CRC trailer)."""
         with open(path, "rb") as f:
-            data = f.read()
+            await self._ota_stream(f.read(), on_progress)
+
+    async def _ota_stream(self, data: bytes, on_progress=None) -> None:
         if len(data) <= 32:
             raise RuntimeError("image too small (missing CRC trailer?)")
         # END crc = the trailer's crc32, computed over the image bytes only (the
@@ -206,6 +348,17 @@ class BadgeLink:
             await self._w(keys.UUID_CHR_OTA, bytes([keys.FRAME_END]) + struct.pack("<I", crc))
         except Exception:
             pass
+
+    # --- per-connection keepalive (1 Hz, bidirectional) ---
+    async def subscribe_keepalive(self, on_rx) -> None:
+        """Subscribe to badge->app keepalive notifications; on_rx(code:int)."""
+        def cb(_char, data: bytearray):
+            on_rx(data[0] if data else 0)
+        await self.client.start_notify(keys.UUID_CHR_KEEPALIVE, cb)
+
+    async def send_keepalive(self, code: int = 0) -> None:
+        """Write an app->badge keepalive (write-without-response for speed)."""
+        await self._w(keys.UUID_CHR_KEEPALIVE, bytes([code & 0xFF]), response=False)
 
     # --- mesh proxy ---
     async def proxy_write(self, pdu: bytes) -> None:

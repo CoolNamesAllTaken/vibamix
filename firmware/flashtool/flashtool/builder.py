@@ -18,15 +18,41 @@ from . import config
 
 
 def firmware_hex(build_dir: Path = config.BUILD_DIR) -> Path:
-    """Return the expected path of the output hex for a given build directory."""
-    return build_dir / "vibamix_zephyr" / "zephyr" / "zephyr.hex"
+    """Return the expected path of the app output hex for a given build directory."""
+    return build_dir / "zephyr" / "zephyr.hex"
+
+
+def bootloader_hex() -> Path:
+    """Return the expected path of the bootloader output hex."""
+    return config.BOOTLOADER_HEX
 
 
 def build(
     build_dir: Path = config.BUILD_DIR,
     on_output: Callable[[str], None] = print,
 ) -> bool:
-    """Run ``west build`` and stream output through *on_output*.
+    """Build the main application (slot A). Returns ``True`` on success."""
+    return _west_build(config.WEST_APP_DIR, build_dir, on_output)
+
+
+def build_bootloader(
+    build_dir: Path = config.BOOTLOADER_BUILD_DIR,
+    on_output: Callable[[str], None] = print,
+) -> bool:
+    """Build the first-stage direct-XIP bootloader. Returns ``True`` on success.
+
+    The bootloader is a separate Zephyr app under ``firmware/bootloader`` but uses
+    the vibamix board, so it still needs ``BOARD_ROOT`` pointed at the app dir.
+    """
+    return _west_build(config.BOOTLOADER_SRC_DIR, build_dir, on_output)
+
+
+def _west_build(
+    src_dir: Path,
+    build_dir: Path,
+    on_output: Callable[[str], None],
+) -> bool:
+    """Run ``west build`` for *src_dir* into *build_dir*, streaming output.
 
     Returns ``True`` if the build succeeded (exit code 0).
     """
@@ -34,7 +60,7 @@ def build(
         "west", "build",
         "-b", config.BOARD,
         "--build-dir", str(build_dir),
-        str(config.WEST_APP_DIR),
+        str(src_dir),
         "--",
         f"-DBOARD_ROOT={config.WEST_APP_DIR}",
     ]

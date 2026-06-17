@@ -3,6 +3,7 @@
 #include "Display_EPD_W21.h"
 #include "GUI_Paint.h"
 #include "fonts.h"
+#include "gateway_status.h"
 #include "qrcodegen.h"
 
 #include <stdio.h>
@@ -268,7 +269,7 @@ void identity_status_screen_draw(GUI &gui, const char *name, const char *table,
 }
 
 void config_screen_connected(GUI &gui, const char *name, const char *table,
-                             int batt_mv, int batt_pct)
+                             int batt_mv, int batt_pct, bool app_alive, bool blink)
 {
     uint8_t *fb = gui.framebuffer();
 
@@ -288,12 +289,31 @@ void config_screen_connected(GUI &gui, const char *name, const char *table,
     const char *lbl = "Connected";
     const int lw = Paint_StringWidth_P(lbl, &PoppinsMd16);
     Paint_DrawString_P(kCanvasW - kMargin - lw, 1, lbl, &PoppinsMd16, WHITE, BLACK);
+
+    // Keepalive dot left of the label: pulses solid/hollow each second while the
+    // laptop's keepalive writes keep arriving; stays hollow (no pulse) if stale.
+    const int dx1 = kCanvasW - kMargin - lw - 6;
+    const int dx0 = dx1 - 8;
+    if (app_alive && blink) {
+        fill_rect(dx0, 5, dx1, 13);   // centered on the status row (y9)
+    } else {
+        draw_rect(dx0, 5, dx1, 13);
+    }
+
     fill_rect(kMargin, 24, kCanvasW - kMargin, 24);
 
     // Body.
     Paint_DrawString_P(kMargin, 48, "Connected", &PoppinsSB24, WHITE, BLACK);
-    Paint_DrawString_P(kMargin, 80, "Editing your badge...",
-                       &PoppinsMd16, WHITE, BLACK);
+    if (gateway_status_count() > 0) {
+        // Acting as a mesh gateway: show the last command relayed to the fleet.
+        char bc[48];
+        snprintf(bc, sizeof(bc), "Broadcast: %s  x%u",
+                 gateway_status_label(), (unsigned)gateway_status_count());
+        Paint_DrawString_P(kMargin, 80, bc, &PoppinsMd16, WHITE, BLACK);
+    } else {
+        Paint_DrawString_P(kMargin, 80, "Editing your badge...",
+                           &PoppinsMd16, WHITE, BLACK);
+    }
     if (name && name[0]) {
         Paint_DrawString_P(kMargin, 110, name, &PoppinsMd20, WHITE, BLACK);
     }

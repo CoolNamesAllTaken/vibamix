@@ -3,6 +3,7 @@
 #include "GUI_Paint.h"
 #include "dither.h"
 #include "fonts.h"
+#include "gateway_status.h"
 #include <string.h>
 #include <zephyr/sys/printk.h>
 
@@ -27,8 +28,8 @@ void GUI::show_hello_world()
     Paint_NewImage(m_image, EPD_WIDTH, EPD_HEIGHT, ROTATE_270, WHITE);
     Paint_Clear(WHITE);
     Paint_DrawString_P(10, 10, "Hello World", &PoppinsMd20, WHITE, BLACK);
-    EPD_Display(m_image);
-    EPD_Update();
+    gateway_status_overlay(m_image);  // mesh-gateway banner (no-op unless relaying)
+    EPD_Display(m_image);  // EPD_Display already triggers a full refresh internally
     printk("ePaper hello world displayed\n");
 }
 
@@ -104,8 +105,8 @@ void GUI::show_text(const char *name, const char *fun_fact)
         }
     }
 
-    EPD_Display(m_image);
-    EPD_Update();
+    gateway_status_overlay(m_image);  // mesh-gateway banner (no-op unless relaying)
+    EPD_Display(m_image);  // EPD_Display already triggers a full refresh internally
     printk("ePaper identity displayed\n");
 }
 
@@ -115,16 +116,16 @@ void GUI::render_image(const uint8_t *buf, size_t len)
     if (buf != m_image && len <= sizeof(m_image)) {
         memcpy(m_image, buf, len);
     }
-    EPD_Display(m_image);
-    EPD_Update();
+    gateway_status_overlay(m_image);  // mesh-gateway banner (no-op unless relaying)
+    EPD_Display(m_image);  // EPD_Display already triggers a full refresh internally
     printk("ePaper image displayed\n");
 }
 
 void GUI::render_gray2(const uint8_t *src, uint16_t w, uint16_t h)
 {
     dither_2bit_to_fb(src, w, h, m_image);
-    EPD_Display(m_image);
-    EPD_Update();
+    gateway_status_overlay(m_image);  // mesh-gateway banner (no-op unless relaying)
+    EPD_Display(m_image);  // EPD_Display already triggers a full refresh internally
     printk("ePaper grayscale image displayed\n");
 }
 

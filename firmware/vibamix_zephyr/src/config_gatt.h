@@ -34,11 +34,15 @@ struct config_gatt_callbacks {
 			     uint8_t r, uint8_t g, uint8_t b);
 	void (*on_ota_start)(uint32_t total);  /* OTA began — show "updating" screen */
 	void (*on_ota_end)(bool ok);           /* OTA finished — show "rebooting"/failed */
+	void (*on_keepalive)(uint8_t code);    /* 1 Hz keepalive write from the laptop */
 };
 
 /* Register the callbacks invoked from GATT write handlers. Pointer must outlive
  * the connection (static lifetime). */
 void config_gatt_set_callbacks(const struct config_gatt_callbacks *cb);
+
+/* Send a keepalive notification to subscribed centrals (badge -> app liveness). */
+int config_gatt_keepalive_notify(uint8_t code);
 
 #ifdef __cplusplus
 }

@@ -324,6 +324,33 @@ appended (`scripts/vbx_trailer.py`). OTA streams the image for the **currently i
 that slot; the first‑stage bootloader CRC‑verifies it and chain‑loads it on reboot. A **watchdog +
 attempt counter** auto‑revert to the previous slot if the new image fails to boot healthily.
 
+### The `.ota` bundle (ship one file)
+
+Rather than ship two loose `slotA.bin` / `slotB.bin` and choose between them by hand, the build
+packs **both** into one **`.ota`** bundle (`scripts/pack_ota.py` → `build/vibamix.ota`). The host
+loads the single bundle, reads the badge's running/inactive slot over BLE (OTA‑status, below), and
+streams the matching slot's image from the bundle — so the app only ever deals with one artifact and
+can't send the wrong slot.
+
+Container layout (little‑endian):
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0  | 4   | magic `"VOTA"` (`0x56 0x4F 0x54 0x41`) |
+| 4  | u16 | format version (= 1) |
+| 6  | u16 | slot count (= 2) |
+| 8  | u32 | app version (shared by both slots) |
+| 12 | u32 | reserved (0) |
+| 16 | 12 × slot_count | directory entries (below) |
+| …  | …   | each slot's image payload at its `offset` |
+
+Each 12‑byte directory entry: `u8 slot` (0 = A, 1 = B), `u8[3]` pad, `u32 offset` (absolute byte
+offset of this slot's image in the file), `u32 length` (image length **including** its 32‑byte CRC
+trailer). To flash: parse the header, read OTA‑status to get the **inactive** slot, find that slot's
+directory entry, and stream `file[offset : offset+length]` as the OTA payload (below). The image
+bytes are exactly a `slotX.bin` (raw image + 32‑byte trailer) — the END `crc32` is still computed
+over `length − 32` bytes.
+
 **Which slot to send:** read the **OTA‑status** characteristic `f0de000A-…` first (read‑only):
 
 | Bytes | Meaning |
@@ -332,8 +359,9 @@ attempt counter** auto‑revert to the previous slot if the new image fails to b
 | `[1] u8` | inactive slot — **send this slot's image** |
 | `[2..5] u32` | active image version (little‑endian; 0 if the running image was flashed over SWD, not OTA'd) |
 
-Send `slotA.bin` if the inactive slot is 0, `slotB.bin` if it is 1. Sending the wrong slot's image
-(linked for the other offset) will fail to boot and be reverted.
+Send `slotA.bin` if the inactive slot is 0, `slotB.bin` if it is 1 — or, with the `.ota` bundle,
+the payload of the matching directory entry. Sending the wrong slot's image (linked for the other
+offset) will fail to boot and be reverted.
 
 **Characteristic:** OTA `f0de0009-…` (Write / Write‑Without‑Response). Framed like the image upload
 but with **u32** size/offset (the image far exceeds 64 KB). All fields little‑endian:

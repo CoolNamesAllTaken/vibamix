@@ -6,6 +6,7 @@ probe-rs for nrfutil / J-Link later means touching only this file.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from collections.abc import Callable
@@ -43,12 +44,67 @@ def _reset_command(dev: UsbDevice) -> list[str]:
 
 def flash_device(
     dev: UsbDevice,
-    firmware: str,
+    firmwares: str | list[str],
     on_progress: ProgressCb,
 ) -> tuple[bool, str]:
-    """Flash, verify, and reset one device.  Returns ``(ok, message)``."""
-    cmd = _command(dev, firmware)
+    """Flash an ordered list of images, then reset once.  Returns ``(ok, message)``.
+
+    ``firmwares`` is one or more hex paths flashed in order (e.g. bootloader then
+    app).  They must target non-overlapping flash regions: probe-rs ``download``
+    only erases the sectors each image covers, so later images don't wipe earlier
+    ones.  Overall progress is split evenly across the images.
+    """
+    images = [firmwares] if isinstance(firmwares, str) else list(firmwares)
+    if not images:
+        return False, "no firmware images to flash"
+
+    n = len(images)
     on_progress(0.0, "starting")
+    for i, fw in enumerate(images):
+        name = _image_name(fw)
+        ok, msg = _flash_one_image(dev, fw, name, i, n, on_progress)
+        if not ok:
+            return False, msg
+
+    # Reset the target once, after the last image, so the new firmware runs.
+    try:
+        subprocess.run(
+            _reset_command(dev),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except Exception:
+        pass  # non-fatal — the flash succeeded even if reset fails
+
+    on_progress(100.0, "done")
+    return True, "ok"
+
+
+def _image_name(firmware: str) -> str:
+    """Short label for progress messages — the bootloader build dir vs. the app."""
+    norm = os.path.normpath(firmware)
+    bl_dir = os.path.normpath(str(config.BOOTLOADER_BUILD_DIR))
+    return "bootloader" if norm.startswith(bl_dir + os.sep) else "app"
+
+
+def _flash_one_image(
+    dev: UsbDevice,
+    firmware: str,
+    name: str,
+    index: int,
+    total: int,
+    on_progress: ProgressCb,
+) -> tuple[bool, str]:
+    """Run one ``probe-rs download``, scaling its 0–100 onto this image's band."""
+    cmd = _command(dev, firmware)
+    span = 100.0 / total
+    base = index * span
+
+    def scaled(pct: float, msg: str) -> None:
+        on_progress(base + (pct / 100.0) * span, f"{name}: {msg}")
+
+    scaled(0.0, "starting")
     try:
         proc = subprocess.Popen(
             cmd,
@@ -64,28 +120,15 @@ def flash_device(
         for line in _read_lines(proc.stdout):
             pct, msg = _parse_progress(line)
             if pct is not None:
-                on_progress(pct, msg)
+                scaled(pct, msg)
         rc = proc.wait(timeout=config.FLASH_TIMEOUT_S)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
-        return False, "timeout"
+        return False, f"{name}: timeout"
 
     if rc != 0:
-        return False, f"probe-rs exited {rc}"
-
-    # Reset the target so the new firmware starts running.
-    try:
-        subprocess.run(
-            _reset_command(dev),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=10,
-        )
-    except Exception:
-        pass  # non-fatal — the flash succeeded even if reset fails
-
-    on_progress(100.0, "done")
+        return False, f"{name}: probe-rs exited {rc}"
     return True, "ok"
 
 

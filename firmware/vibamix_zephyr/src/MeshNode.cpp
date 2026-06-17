@@ -3,6 +3,7 @@
 #include "ConfigMode.h"
 #include "app_config.h"
 #include "badge_store.h"
+#include "gateway_status.h"
 #include "identity.h"
 #include "image_xfer.h"
 #include "mesh_keys.h"
@@ -220,12 +221,22 @@ void MeshNode::apply_frame_led(uint8_t kind, uint8_t idx)
 void MeshNode::on_set_name(const char *name, size_t len)
 {
     app_config_set_name(name, len);
+    // As a connected gateway, record the relayed command for the status banner and
+    // skip the (build-only) identity redraw so it doesn't churn the gateway screen.
+    if (gateway_status_active()) {
+        gateway_status_note(GW_CMD_NAME);
+        return;
+    }
     redraw_identity();
 }
 
 void MeshNode::on_set_fun_fact(const char *fact, size_t len)
 {
     app_config_set_fun_fact(fact, len);
+    if (gateway_status_active()) {
+        gateway_status_note(GW_CMD_FUNFACT);
+        return;
+    }
     redraw_identity();
 }
 
@@ -233,13 +244,20 @@ void MeshNode::on_set_led_color(uint8_t r, uint8_t g, uint8_t b)
 {
     app_config_set_color(r, g, b);
     if (m_leds) {
-        m_leds->set_color(r, g, b);
+        m_leds->set_color(r, g, b);   // applied on the gateway too
+    }
+    if (gateway_status_active()) {
+        gateway_status_note(GW_CMD_LED);
     }
 }
 
 void MeshNode::on_set_attendee_id(const char *id, size_t len)
 {
     app_config_set_attendee_id(id, len);
+    if (gateway_status_active()) {
+        gateway_status_note(GW_CMD_ATTENDEE);
+        return;
+    }
     redraw_identity();   // table ID lives on the identity screen
 }
 
@@ -252,6 +270,9 @@ void MeshNode::on_set_frame_led(uint8_t kind, uint8_t idx, uint8_t anim,
     const struct app_config *cfg = app_config_get();
     if (cfg->has_disp && cfg->disp_kind == kind && cfg->disp_idx == idx) {
         apply_frame_led(kind, idx);
+    }
+    if (gateway_status_active()) {
+        gateway_status_note(GW_CMD_FRAMELED);
     }
 }
 
@@ -282,12 +303,22 @@ void MeshNode::on_set_screen(uint8_t idx, const char *hdr, size_t hlen,
                              const char *body, size_t blen)
 {
     app_config_set_screen(idx, hdr, hlen, body, blen);
+    if (gateway_status_active()) {
+        gateway_status_note(GW_CMD_SCREEN);
+    }
 }
 
 void MeshNode::on_display_screen(uint8_t kind, uint8_t idx)
 {
     if (!m_gui) {
         return;
+    }
+
+    // A connected gateway shows the displayed content (it applies the command) with
+    // the status banner; mark the screen taken over so the countdown stops repainting.
+    if (gateway_status_active()) {
+        gateway_status_note(GW_CMD_DISPLAY);
+        config_mode_on_content();
     }
 
     if (kind == APP_DISP_KIND_TEXT) {

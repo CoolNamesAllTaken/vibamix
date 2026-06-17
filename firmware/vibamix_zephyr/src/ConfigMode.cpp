@@ -2,8 +2,10 @@
 
 #include "MeshNode.h"
 #include "app_config.h"
+#include "badge_store.h"
 #include "battery.h"
 #include "config_gatt.h"
+#include "gateway_status.h"
 #include "identity.h"
 #include "image_xfer.h"
 #include "qr_screen.h"
@@ -40,6 +42,36 @@ static atomic_t         s_conn_count; // active connections (BT thread inc/dec)
 // Set from the mesh-RX (BT) thread; consumed on the main thread so only the main
 // thread ever writes the 64-bit s_last_activity (no torn write on the 32-bit M33).
 static atomic_t s_heartbeat_pending;
+
+// Per-connection keepalive: the laptop writes f0de000B once a second (app->badge
+// liveness). cb_keepalive (BT thread) just sets the flag; the main loop records the
+// time (so the 64-bit timestamp is only written on the main thread).
+static atomic_t s_keepalive_pending;
+static int64_t  s_last_keepalive_rx;
+
+// Deferred content render. The GATT/mesh completion callbacks run on the BT RX
+// thread; doing the flash write + multi-second ePaper full refresh there blocks the
+// link and the central drops the connection. So the callbacks just record the work
+// (atomically) and the main loop in run() performs it on the main thread.
+//
+// Images are copied into a ping-pong of two render buffers: the END write is acked
+// immediately, so a *next* upload can begin (overwriting the staging buffer) and
+// even complete while the previous image is still rendering. The BT thread fills
+// whichever buffer the main thread isn't currently rendering, so there's no shared
+// mutable state between them during the (slow) render.
+struct pending_img {
+    uint8_t  slot, fmt;
+    uint16_t w, h;
+    uint32_t len;
+};
+static uint8_t            s_render_buf[2][BADGE_IMG_GRAY2_BYTES];
+static struct pending_img s_pimg[2];
+static volatile int8_t    s_next_buf;          // BT: buffer to fill next
+static volatile int8_t    s_rendering_buf = -1; // main: buffer in use (-1 = idle)
+static volatile int8_t    s_pending_buf;        // buffer holding the pending image
+static atomic_t           s_image_pending;
+static atomic_t           s_display_pending;
+static uint8_t            s_pd_kind, s_pd_idx;
 
 // Dedicated fast connectable advertiser, run only during config mode so a laptop
 // finds the badge instantly. The mesh proxy's own advertising is slow (~1.9 s
@@ -144,6 +176,12 @@ static void cb_frame_led(uint8_t kind, uint8_t idx, uint8_t anim,
     if (s_self) { s_self->on_frame_led(kind, idx, anim, r, g, b); }
 }
 
+static void cb_keepalive(uint8_t code)
+{
+    ARG_UNUSED(code);
+    atomic_set(&s_keepalive_pending, 1);
+}
+
 void config_mode_on_button(void)
 {
     if (s_self) { s_self->request_exit(); }
@@ -171,6 +209,7 @@ static const struct config_gatt_callbacks s_gatt_cb = {
     .on_frame_led = cb_frame_led,
     .on_ota_start = cb_ota_start,
     .on_ota_end   = cb_ota_end,
+    .on_keepalive = cb_keepalive,
 };
 
 static void conn_connected(struct bt_conn *conn, uint8_t err)
@@ -226,12 +265,27 @@ void ConfigMode::on_name(const char *s, size_t len)
 void ConfigMode::on_content_image(uint8_t slot, uint8_t fmt, const uint8_t *buf,
                                   size_t len, uint16_t w, uint16_t h)
 {
-    // Store + render via the mesh path, then stop the countdown from repainting.
-    if (m_mesh) {
-        m_mesh->on_image(slot, fmt, buf, len, w, h);
+    // Runs on the BT RX thread: record the work and let run() do the store+render
+    // on the main thread (rendering here would block the link and drop the
+    // connection). Copy into the buffer the main thread isn't rendering, so a
+    // fast-acked next upload can't clobber an in-flight render.
+    int idx = s_next_buf;
+    if (idx == s_rendering_buf) {
+        idx ^= 1;
     }
+    if (len > sizeof(s_render_buf[idx])) {
+        return;
+    }
+    memcpy(s_render_buf[idx], buf, len);
+    s_pimg[idx].slot = slot;
+    s_pimg[idx].fmt = fmt;
+    s_pimg[idx].w = w;
+    s_pimg[idx].h = h;
+    s_pimg[idx].len = (uint32_t)len;
+    s_pending_buf = idx;
+    s_next_buf = idx ^ 1;
     s_content_shown = true;
-    note_activity();
+    atomic_set(&s_image_pending, 1);
 }
 
 void ConfigMode::on_screen(uint8_t idx, const char *hdr, size_t hlen,
@@ -245,11 +299,12 @@ void ConfigMode::on_screen(uint8_t idx, const char *hdr, size_t hlen,
 
 void ConfigMode::on_display(uint8_t kind, uint8_t idx)
 {
-    if (m_mesh) {
-        m_mesh->on_display_screen(kind, idx);
-    }
+    // Defer the render to the main loop (see on_content_image) — it reads stored
+    // content from flash/settings, so no buffer copy is needed.
+    s_pd_kind = kind;
+    s_pd_idx = idx;
     s_content_shown = true;
-    note_activity();
+    atomic_set(&s_display_pending, 1);
 }
 
 void ConfigMode::on_ota_start(uint32_t total)
@@ -296,6 +351,8 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
     m_mesh = mesh;
     s_self = this;
     s_content_shown = false;
+    atomic_clear(&s_image_pending);
+    atomic_clear(&s_display_pending);
     note_activity();
 
     config_gatt_set_callbacks(&s_gatt_cb);
@@ -343,11 +400,35 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
     enum { PHASE_QR, PHASE_CONNECTED, PHASE_IDENTITY } phase = PHASE_QR;
     int last_shown = -1;
     int tick = 0;
+    int64_t last_ka_sent = 0;   // last 1 Hz keepalive notify (main thread)
+    uint8_t ka_seq = 0;
+    bool    ka_blink = false;
+    int     ka_tick = 0;
 
     for (;;) {
         // Consume a mesh heartbeat/content event (set on the BT thread) here so
         // the 64-bit s_last_activity is only ever written from the main thread.
         if (atomic_cas(&s_heartbeat_pending, 1, 0)) {
+            note_activity();
+        }
+        // Same for the inbound keepalive write (app -> badge liveness).
+        if (atomic_cas(&s_keepalive_pending, 1, 0)) {
+            s_last_keepalive_rx = k_uptime_get();
+            note_activity();
+        }
+
+        // Render deferred content on the main thread — never on the BT thread,
+        // where the multi-second ePaper refresh stalls and drops the BLE link.
+        if (atomic_cas(&s_image_pending, 1, 0)) {
+            int idx = s_pending_buf;
+            s_rendering_buf = idx;   // tells the BT thread to use the other buffer
+            const struct pending_img p = s_pimg[idx];
+            mesh->on_image(p.slot, p.fmt, s_render_buf[idx], p.len, p.w, p.h);
+            s_rendering_buf = -1;
+            note_activity();
+        }
+        if (atomic_cas(&s_display_pending, 1, 0)) {
+            mesh->on_display_screen(s_pd_kind, s_pd_idx);
             note_activity();
         }
 
@@ -362,16 +443,21 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
         if (connected && phase != PHASE_CONNECTED) {
             phase = PHASE_CONNECTED;
             s_content_shown = false;
+            s_last_keepalive_rx = k_uptime_get();  // assume alive at connect
+            last_ka_sent = 0;                      // notify immediately
+            ka_blink = false;
+            gateway_status_set_active(true);       // relayed mesh commands now overlay
             gui->wake();
             config_screen_connected(*gui, cfg->name,
                                     cfg->has_attendee ? cfg->attendee_id : "",
-                                    batt_mv, batt_pct);
+                                    batt_mv, batt_pct, true, false);
             gui->set_base_map();
             last_shown = -1;
         } else if (!connected && phase == PHASE_CONNECTED) {
             // Just disconnected: show the identity screen + a fresh countdown.
             phase = PHASE_IDENTITY;
             s_content_shown = false;
+            gateway_status_set_active(false);
             note_activity();
             last_shown = -1;
         }
@@ -381,6 +467,28 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
         }
         if (!connected && (k_uptime_get() - s_last_activity) >= kConfigWindowMs) {
             break;
+        }
+
+        // While connected: 1 Hz bidirectional keepalive. Notify the laptop
+        // (badge->app liveness) and repaint a pulsing dot whose fill reflects
+        // whether the laptop's keepalive writes are still arriving (app->badge).
+        if (connected && phase == PHASE_CONNECTED && !s_content_shown) {
+            int64_t now = k_uptime_get();
+            if (now - last_ka_sent >= 1000) {
+                last_ka_sent = now;
+                config_gatt_keepalive_notify(ka_seq++);
+                ka_blink = !ka_blink;
+                bool app_alive = (now - s_last_keepalive_rx) < 3000;
+                gateway_status_set_keepalive(app_alive, ka_blink);  // feed the banner dot
+                config_screen_connected(*gui, cfg->name,
+                                        cfg->has_attendee ? cfg->attendee_id : "",
+                                        batt_mv, batt_pct, app_alive, ka_blink);
+                if (++ka_tick % kFullRefreshEvery == 0) {
+                    gui->set_base_map();
+                } else {
+                    gui->refresh_partial();
+                }
+            }
         }
 
         // Per-second repaint for the QR and identity phases (not while connected,
@@ -411,6 +519,7 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
     }
     printk("config: window closing (%s)\n", s_exit ? "button" : "timeout");
 
+    gateway_status_set_active(false);
     stop_fast_adv();
 
     // Rest on a clean identity screen (no status bar) unless a specific frame or
