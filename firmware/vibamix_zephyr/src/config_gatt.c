@@ -3,6 +3,9 @@
 #include "badge_store.h"
 #include "image_xfer.h"
 #include "ota.h"
+#include "slots.h"
+
+#include "bl_state.h"
 
 #include <string.h>
 #include <zephyr/bluetooth/conn.h>
@@ -20,6 +23,7 @@
 #define VBX_UUID_ATTND   BT_UUID_128_ENCODE(0xf0de0007, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
 #define VBX_UUID_FRMLED  BT_UUID_128_ENCODE(0xf0de0008, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
 #define VBX_UUID_OTA     BT_UUID_128_ENCODE(0xf0de0009, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
+#define VBX_UUID_OTAST   BT_UUID_128_ENCODE(0xf0de000A, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
 
 static const struct bt_uuid_128 vbx_svc_uuid     = BT_UUID_INIT_128(VBX_UUID_SVC);
 static const struct bt_uuid_128 vbx_img_uuid     = BT_UUID_INIT_128(VBX_UUID_IMG);
@@ -30,6 +34,7 @@ static const struct bt_uuid_128 vbx_display_uuid = BT_UUID_INIT_128(VBX_UUID_DIS
 static const struct bt_uuid_128 vbx_attnd_uuid   = BT_UUID_INIT_128(VBX_UUID_ATTND);
 static const struct bt_uuid_128 vbx_frmled_uuid  = BT_UUID_INIT_128(VBX_UUID_FRMLED);
 static const struct bt_uuid_128 vbx_ota_uuid     = BT_UUID_INIT_128(VBX_UUID_OTA);
+static const struct bt_uuid_128 vbx_otast_uuid   = BT_UUID_INIT_128(VBX_UUID_OTAST);
 
 /* Chunk framing op bytes, shared by the image/image-slot/screen characteristics. */
 #define OP_START 0x01
@@ -284,9 +289,12 @@ static ssize_t frmled_write(struct bt_conn *conn, const struct bt_gatt_attr *att
 	return len;
 }
 
-/* f0de0009 — OTA firmware update. Streams a signed MCUboot image into slot1.
+/* f0de0009 — OTA firmware update. Streams the trailered image built for the
+ * *inactive* direct-XIP slot (raw image + 32-byte CRC trailer; see vbx_img.h)
+ * into that slot. Read f0de000A first to learn which slot to send.
  * START = op,le32 total_size ; DATA = op,le32 offset,bytes ; END = op,le32 crc32.
- * (u32 fields — the image is ~360 KB, well beyond the u16 used elsewhere.) */
+ * total_size includes the trailer; crc32 is the trailer's crc32 (over the image
+ * bytes only). (u32 fields — the image is ~360 KB, beyond the u16 used elsewhere.) */
 static ssize_t ota_write_char(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			      const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
 {
@@ -335,6 +343,26 @@ static ssize_t ota_write_char(struct bt_conn *conn, const struct bt_gatt_attr *a
 	return len;
 }
 
+/* f0de000A — OTA status (read-only). Lets the host learn which slot to target:
+ * [0]=active_slot, [1]=inactive_slot, [2..5]=le32 active image version (0 if the
+ * running image was flashed over SWD rather than OTA'd, so bl_state has no record). */
+static ssize_t otast_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+			  void *buf, uint16_t len, uint16_t offset)
+{
+	uint8_t st[6];
+	struct bl_state_rec rec;
+	uint32_t version = 0;
+
+	if (bl_state_read(&rec) == 0) {
+		version = rec.slot[MY_SLOT].version;
+	}
+	st[0] = MY_SLOT;
+	st[1] = OTHER_SLOT;
+	sys_put_le32(version, st + 2);
+
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, st, sizeof(st));
+}
+
 BT_GATT_SERVICE_DEFINE(vbx_cfg_svc,
 	BT_GATT_PRIMARY_SERVICE(&vbx_svc_uuid),
 	BT_GATT_CHARACTERISTIC(&vbx_img_uuid.uuid,
@@ -361,4 +389,7 @@ BT_GATT_SERVICE_DEFINE(vbx_cfg_svc,
 	BT_GATT_CHARACTERISTIC(&vbx_ota_uuid.uuid,
 			       BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP,
 			       BT_GATT_PERM_WRITE, NULL, ota_write_char, NULL),
+	BT_GATT_CHARACTERISTIC(&vbx_otast_uuid.uuid,
+			       BT_GATT_CHRC_READ,
+			       BT_GATT_PERM_READ, otast_read, NULL, NULL),
 );

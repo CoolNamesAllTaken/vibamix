@@ -10,6 +10,9 @@ list(APPEND BOARD_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(vibamix)
 
+# Shared headers + bl_state used by both the app and the bootloader.
+target_include_directories(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common)
+
 # NORDIC SDK APP START
 target_sources(app PRIVATE
   src/main.cpp
@@ -27,6 +30,7 @@ target_sources(app PRIVATE
   src/badge_store.c
   src/dither.c
   src/ota.c
+  ../common/bl_state.c
 )
 
 add_subdirectory(../peripherals/epd epd)

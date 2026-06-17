@@ -1,0 +1,9 @@
+/*
+ * Link the bootloader into bootloader_partition (0x0). The board's default
+ * code-partition is slot_a (for the app build); override it here.
+ */
+/ {
+	chosen {
+		zephyr,code-partition = &bootloader_partition;
+	};
+};

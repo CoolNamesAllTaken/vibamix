@@ -50,7 +50,12 @@ UUID_CHR_SCREEN = _u(0x0004)     # store text screen
 UUID_CHR_IMGSLOT = _u(0x0005)    # store image slot (BW or 2-bit gray)
 UUID_CHR_DISPLAY = _u(0x0006)    # show stored screen
 # (0x0007 attendee, 0x0008 per-frame LED — firmware-side; not used by badgectl yet)
-UUID_CHR_OTA = _u(0x0009)        # firmware OTA update (signed MCUboot image)
+UUID_CHR_OTA = _u(0x0009)        # firmware OTA update (trailered direct-XIP image)
+UUID_CHR_OTA_STATUS = _u(0x000A)  # read: active_slot, inactive_slot, le32 version
+
+# OTA slots (direct-XIP A/B). Mirror BL_SLOT_* in firmware/common/bl_state.h.
+OTA_SLOT_A = 0
+OTA_SLOT_B = 1
 
 # --- Mesh GATT Proxy service (SIG-assigned) ---
 UUID_PROXY_SVC = "00001828-0000-1000-8000-00805f9b34fb"

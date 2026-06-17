@@ -67,12 +67,13 @@ static int draw_battery_icon(int x, int y, int pct)
 // progress bar that shrinks from full toward empty as remaining/total falls.
 static void draw_status_bar(int batt_mv, int batt_pct, int remaining_sec, int total_sec)
 {
-    char buf[16];
+    char buf[20];
 
-    // Battery (left).
+    // Battery (left): "NN% (X.XXV)".
     const int icon_end = draw_battery_icon(kMargin, 4, batt_mv >= 0 ? batt_pct : 0);
     if (batt_mv >= 0) {
-        snprintf(buf, sizeof(buf), "%d%%", batt_pct);
+        snprintf(buf, sizeof(buf), "%d%% (%d.%02dV)", batt_pct,
+                 batt_mv / 1000, (batt_mv % 1000) / 10);
     } else {
         snprintf(buf, sizeof(buf), "-- %%");
     }
@@ -275,10 +276,11 @@ void config_screen_connected(GUI &gui, const char *name, const char *table,
     Paint_Clear(WHITE);
 
     // Status bar: battery (left) + "Connected" (right), divider — no countdown.
-    char pc[8];
+    char pc[20];
     const int icon_end = draw_battery_icon(kMargin, 4, batt_mv >= 0 ? batt_pct : 0);
     if (batt_mv >= 0) {
-        snprintf(pc, sizeof(pc), "%d%%", batt_pct);
+        snprintf(pc, sizeof(pc), "%d%% (%d.%02dV)", batt_pct,
+                 batt_mv / 1000, (batt_mv % 1000) / 10);
     } else {
         snprintf(pc, sizeof(pc), "-- %%");
     }

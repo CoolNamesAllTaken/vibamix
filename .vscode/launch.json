@@ -7,11 +7,16 @@
             "request": "launch",
             "servertype": "external",
             "gdbTarget": "localhost:1337",
-            "executable": "${workspaceFolder}/firmware/vibamix_zephyr/build/vibamix_zephyr/zephyr/zephyr.elf",
+            "executable": "${workspaceFolder}/firmware/vibamix_zephyr/build/zephyr/zephyr.elf",
             "preLaunchTask": "probe-rs GDB server",
             "showDevDebugOutput": "none",
+            // The app is linked into slot A (0xE000); `load` writes it there. After
+            // `monitor reset halt` the core sits at the bootloader's reset vector
+            // (0x0); `continue` runs the BL, which sees the attached debugger
+            // (C_DEBUGEN) and jumps to slot A, stopping at `main`.
             "overrideLaunchCommands": [
                 "set remote hardware-breakpoint-limit 8",
+                "load",
                 "monitor reset halt",
                 "hbreak main",
                 "continue"
@@ -22,6 +27,7 @@
                 "continue"
             ],
             "overrideResetCommands": [
+                "load",
                 "monitor reset halt",
                 "hbreak main",
                 "continue"

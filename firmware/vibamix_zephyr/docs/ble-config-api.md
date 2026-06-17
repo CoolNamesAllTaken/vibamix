@@ -78,7 +78,8 @@ Notes:
 | **Display** | `f0de0006-…` | Write | Show a stored screen: `u8 kind, u8 idx` (see §9). |
 | **Attendee‑ID** | `f0de0007-…` | Write | UTF‑8 string, **≤ 10 bytes** — the table/seat ID shown on the identity screen (see §9.1). |
 | **Frame‑LED** | `f0de0008-…` | Write | Per‑frame LED animation + color: `u8 kind, u8 idx, u8 anim, u8 r, u8 g, u8 b` (see §9.2). |
-| **OTA** | `f0de0009-…` | Write, Write‑Without‑Response | Firmware update: stream a signed MCUboot image into slot 1, then reboot/swap (see §10). |
+| **OTA** | `f0de0009-…` | Write, Write‑Without‑Response | Firmware update: stream the trailered image for the inactive direct‑XIP slot, then reboot (see §10). |
+| **OTA‑status** | `f0de000A-…` | Read | `u8 active_slot, u8 inactive_slot, u32 active_version` — tells the host which slot image to send (see §10). |
 
 (All UUIDs share the base `…-4b1c-4e2a-9a11-a1b2c3d4e5f6`.) All multi‑byte integers in payloads are
 **little‑endian**.
@@ -316,48 +317,65 @@ redraws a clean identity screen and sleeps.
 
 ## 10. Firmware update (OTA)
 
-Stream a new **signed MCUboot image** into the badge's secondary slot, then let MCUboot apply it on
-reboot. The badge runs MCUboot in **swap‑with‑revert** mode: the new image is swapped in and must
-self‑confirm on boot, or MCUboot reverts to the previous one.
+The badge uses a **custom direct‑XIP A/B bootloader** (no MCUboot). There are two app slots, A and
+B; the app is built **twice**, linked at each slot's offset (`scripts/build_slots.sh` →
+`slotA.bin` / `slotB.bin`). Each `slotX.bin` is the raw image with a **32‑byte CRC trailer**
+appended (`scripts/vbx_trailer.py`). OTA streams the image for the **currently inactive** slot into
+that slot; the first‑stage bootloader CRC‑verifies it and chain‑loads it on reboot. A **watchdog +
+attempt counter** auto‑revert to the previous slot if the new image fails to boot healthily.
 
-**Image to send:** the signed update binary from the build —
-`build/vibamix_zephyr/zephyr/zephyr.signed.bin` (raw, ~360 KB). Do **not** send `merged.hex` or the
-unsigned `zephyr.bin`. The image must be signed with the same key the running bootloader trusts.
+**Which slot to send:** read the **OTA‑status** characteristic `f0de000A-…` first (read‑only):
+
+| Bytes | Meaning |
+|-------|---------|
+| `[0] u8` | active slot (0 = A, 1 = B) — the slot currently running |
+| `[1] u8` | inactive slot — **send this slot's image** |
+| `[2..5] u32` | active image version (little‑endian; 0 if the running image was flashed over SWD, not OTA'd) |
+
+Send `slotA.bin` if the inactive slot is 0, `slotB.bin` if it is 1. Sending the wrong slot's image
+(linked for the other offset) will fail to boot and be reverted.
 
 **Characteristic:** OTA `f0de0009-…` (Write / Write‑Without‑Response). Framed like the image upload
 but with **u32** size/offset (the image far exceeds 64 KB). All fields little‑endian:
 
 | Op | Bytes | Meaning |
 |----|-------|---------|
-| START `0x01` | `u8 op` `u32 total_size` | Begin; opens slot 1 and shows "Updating firmware". |
+| START `0x01` | `u8 op` `u32 total_size` | Begin; erases + opens the inactive slot, shows "Updating firmware". `total_size` includes the 32‑byte trailer. |
 | DATA  `0x02` | `u8 op` `u32 offset` `bytes…` | Append a chunk. `offset` **must equal** the running byte count (send in order). Chunk ≤ `ATT_MTU − 3 − 5`. |
-| END   `0x03` | `u8 op` `u32 crc32` | CRC‑32/IEEE over the **whole** image. Badge verifies size+CRC, requests the swap, and reboots ~1.2 s later. |
+| END   `0x03` | `u8 op` `u32 crc32` | CRC‑32/IEEE over the **image bytes only** (= the trailer's `crc32`, i.e. `total_size − 32` bytes). Badge verifies size + trailer + CRC, marks the slot pending, and reboots ~1.2 s later. |
 
 **Behavior & rules**
 - Send DATA **in order**; a gap (offset ≠ bytes received) aborts the transfer. Reliable writes
   (Write‑With‑Response) are recommended.
-- On END the badge verifies the byte count and CRC; if either fails it returns an ATT error and
-  stays on the old firmware. MCUboot independently verifies the signature on swap — a corrupt or
-  unsigned image will not be booted.
+- On END the badge verifies the byte count, the trailer magic/length, and the CRC; if any fails it
+  returns an ATT error and stays on the old slot. The inactive slot is written raw — the **active
+  slot is never touched**, so a power fail mid‑update simply leaves the running image intact.
 - After a successful END the link **drops** when the badge reboots (~1.2 s) — treat a disconnect
   right after END as success, then re‑scan/reconnect.
-- The new image **self‑confirms** once it boots far enough to bring BLE/mesh up; an image that
-  crashes/resets before that is **reverted** by MCUboot on the next boot. (There is no watchdog, so
-  an image that *hangs* without resetting must be recovered over SWD.)
+- The new image **self‑confirms** once it boots far enough to bring BLE/mesh up. An image that
+  crashes/resets, **or hangs**, before confirming is **auto‑reverted**: the bootloader counts the
+  trial boot and arms the watchdog, so the next boot drops the unconfirmed image and runs the
+  previous confirmed slot.
 - Do this in config mode (badge awake); each DATA resets the awake window so it won't sleep mid‑update.
 
 Upload sequence (JS):
 ```js
-const OTA = 'f0de0009-4b1c-4e2a-9a11-a1b2c3d4e5f6';
+const OTA   = 'f0de0009-4b1c-4e2a-9a11-a1b2c3d4e5f6';
+const OTAST = 'f0de000a-4b1c-4e2a-9a11-a1b2c3d4e5f6';
+const st = new DataView((await (await svc.getCharacteristic(OTAST)).readValue()).buffer);
+const inactive = st.getUint8(1);                 // 0 -> send slotA.bin, 1 -> slotB.bin
+const img = inactive === 0 ? slotA : slotB;      // raw image + 32-byte trailer
+const crc = crc32(img.slice(0, img.length - 32)); // CRC over image bytes only (= trailer crc32)
+
 const c = await svc.getCharacteristic(OTA);
 const u32 = v => { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, v, true); return b; };
-await c.writeValueWithResponse(Uint8Array.of(0x01, ...u32(img.length)));        // START
+await c.writeValueWithResponse(Uint8Array.of(0x01, ...u32(img.length)));        // START (incl. trailer)
 const CH = 240;                                                                 // ≤ MTU-3-5
 for (let off = 0; off < img.length; off += CH) {
   const part = img.slice(off, off + CH);
   await c.writeValueWithResponse(Uint8Array.of(0x02, ...u32(off), ...part));    // DATA
 }
-await c.writeValueWithResponse(Uint8Array.of(0x03, ...u32(crc32(img))));        // END (badge reboots)
+await c.writeValueWithResponse(Uint8Array.of(0x03, ...u32(crc)));               // END (badge reboots)
 ```
 
 ---
@@ -411,7 +429,8 @@ Service     f0de0001-…   (base …-4b1c-4e2a-9a11-a1b2c3d4e5f6)
   Display   f0de0006-…   write  u8 kind, u8 idx
   Attendee  f0de0007-…   write UTF-8, <=10 bytes  (table/seat ID -> identity screen)
   Frame-LED f0de0008-…   write  u8 kind, u8 idx, u8 anim, u8 r, u8 g, u8 b
-  OTA       f0de0009-…   write / write-no-response  (signed firmware -> slot1, reboot)
+  OTA       f0de0009-…   write / write-no-response  (trailered image -> inactive slot, reboot)
+  OTA-status f0de000A-…  read   u8 active_slot, u8 inactive_slot, u32 active_version
 
 Image (f0de0002) / Image-slot (f0de0005) frames (little-endian):
   Image      START 0x01 | u16 size(=5808) | u16 w(=176) | u16 h(=264)
@@ -430,10 +449,11 @@ Frame-LED (f0de0008): u8 kind | u8 idx | u8 anim | u8 r | u8 g | u8 b
   anim: 0=off/no-override 1=solid 2=rainbow 3=wheel 4=breathe 5=comet 6=sparkle
 
 OTA (f0de0009) frames (little-endian, u32 size/offset — image ~360 KB):
-  START 0x01 | u32 total_size
+  START 0x01 | u32 total_size            (raw image + 32-byte CRC trailer)
   DATA  0x02 | u32 offset | bytes...      (offset == bytes sent so far; in order)
-  END   0x03 | u32 crc32(IEEE over whole image)
-  Send build/vibamix_zephyr/zephyr/zephyr.signed.bin; badge swaps + reboots ~1.2 s after END.
+  END   0x03 | u32 crc32(IEEE over image bytes only = total_size-32 = trailer crc32)
+  Read f0de000A first; send build/slotA.bin or build/slotB.bin for the INACTIVE slot.
+  Badge verifies + reboots ~1.2 s after END; auto-reverts if the new image can't confirm.
 
 1bpp framebuffer: 5808 bytes = 264 rows x 22 bytes, MSB=leftmost, bit 1=white / 0=black.
   Pack landscape (dx∈0..263, dy∈0..175): idx = (263-dx)*22 + (dy>>3); mask = 0x80>>(dy&7).

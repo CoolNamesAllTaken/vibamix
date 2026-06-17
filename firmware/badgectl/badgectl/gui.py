@@ -307,19 +307,21 @@ class MainWindow(QMainWindow):
         gl.addWidget(db)
         v.addWidget(g)
 
-        # Firmware OTA
+        # Firmware OTA (direct-XIP A/B)
         g = QGroupBox("Firmware update / OTA (f0de0009)")
         gl = QGridLayout(g)
         self.g_ota_path = QLineEdit()
         self.g_ota_path.setReadOnly(True)
-        self.g_ota_path.setPlaceholderText("build/vibamix_zephyr/zephyr/zephyr.signed.bin")
+        self.g_ota_path.setPlaceholderText("build dir containing slotA.bin / slotB.bin")
         obrowse = QPushButton("Browse…")
         obrowse.setObjectName("ghost")
         obrowse.clicked.connect(self._pick_ota)
         self.g_ota_prog = QProgressBar()
         oup = QPushButton("Upload + reboot")
         oup.clicked.connect(lambda: self._go(self._upload_ota()))
-        warn = QLabel("Send the signed image. Badge reboots into it (~30–60 s); keep it awake.")
+        warn = QLabel("Reads which slot is inactive and sends that slot's image. "
+                      "Badge verifies, reboots into it (~5 s), then auto-reverts if it fails.")
+        warn.setWordWrap(True)
         warn.setStyleSheet("color:#9aa4b2;")
         gl.addWidget(self.g_ota_path, 0, 0)
         gl.addWidget(obrowse, 0, 1)
@@ -365,21 +367,24 @@ class MainWindow(QMainWindow):
         self._log("Image upload complete (badge refreshes ~2 s).")
 
     def _pick_ota(self) -> None:
-        fn, _ = QFileDialog.getOpenFileName(
-            self, "Pick signed firmware image", "", "Signed image (*.bin);;All files (*)"
+        d = QFileDialog.getExistingDirectory(
+            self, "Pick build dir (contains slotA.bin / slotB.bin)"
         )
-        if fn:
-            self.g_ota_path.setText(fn)
+        if d:
+            self.g_ota_path.setText(d)
 
     async def _upload_ota(self) -> None:
-        path = self.g_ota_path.text()
-        if not path:
-            self._log("Pick a signed firmware .bin first (zephyr.signed.bin).")
+        build_dir = self.g_ota_path.text()
+        if not build_dir:
+            self._log("Pick the build dir containing slotA.bin / slotB.bin first.")
             return
-        self._log(f"OTA: uploading {path} …")
+        active, inactive, ver = await self.link.read_ota_status()
+        self._log(f"OTA: active slot {active} (v{ver}); sending image for inactive slot {inactive} …")
         self.g_ota_prog.setValue(0)
-        await self.link.ota_update(path, on_progress=lambda d, n: self.g_ota_prog.setValue(int(d * 100 / n)))
-        self._log("OTA: image sent. Badge verifies, swaps, and reboots (~1 s). Reconnect after.")
+        slot = await self.link.ota_update_auto(
+            build_dir, on_progress=lambda d, n: self.g_ota_prog.setValue(int(d * 100 / n)))
+        self._log(f"OTA: slot {slot} image sent. Badge verifies + reboots (~5 s); "
+                  "auto-reverts if it can't confirm. Reconnect after.")
 
     async def _gatt_set_name(self) -> None:
         await self.link.set_name(self.g_name.text())

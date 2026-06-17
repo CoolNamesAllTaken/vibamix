@@ -153,11 +153,42 @@ class BadgeLink:
     async def display(self, kind: int, idx: int) -> None:
         await self._w(keys.UUID_CHR_DISPLAY, bytes([kind, idx]))
 
-    # --- firmware OTA (signed MCUboot image -> slot1) ---
+    # --- firmware OTA (trailered direct-XIP image -> inactive slot) ---
+    async def read_ota_status(self) -> tuple[int, int, int]:
+        """Return (active_slot, inactive_slot, active_version) from f0de000A."""
+        assert self.client is not None
+        v = await self.client.read_gatt_char(keys.UUID_CHR_OTA_STATUS)
+        if len(v) < 6:
+            raise RuntimeError(f"OTA status too short ({len(v)} bytes)")
+        active, inactive = v[0], v[1]
+        version = struct.unpack_from("<I", v, 2)[0]
+        return active, inactive, version
+
+    async def ota_update_auto(self, build_dir: str, on_progress=None) -> int:
+        """Pick slotA.bin/slotB.bin for the badge's inactive slot and flash it.
+
+        Returns the slot index that was updated. The image must have been built
+        for that slot (slots are linked at different offsets — direct-XIP)."""
+        import os
+
+        _active, inactive, _ver = await self.read_ota_status()
+        name = "slotA.bin" if inactive == keys.OTA_SLOT_A else "slotB.bin"
+        path = os.path.join(build_dir, name)
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"inactive slot {inactive} needs {name}, not found in {build_dir}")
+        await self.ota_update(path, on_progress)
+        return inactive
+
     async def ota_update(self, path: str, on_progress=None) -> None:
+        """Stream a trailered slot image (raw image + 32-byte CRC trailer)."""
         with open(path, "rb") as f:
             data = f.read()
-        crc = zlib.crc32(data) & 0xFFFFFFFF
+        if len(data) <= 32:
+            raise RuntimeError("image too small (missing CRC trailer?)")
+        # END crc = the trailer's crc32, computed over the image bytes only (the
+        # firmware re-derives image_len = total - 32 and verifies against it).
+        crc = zlib.crc32(data[:-32]) & 0xFFFFFFFF
         # OTA uses u32 size/offset (image ~360 KB exceeds the u16 used elsewhere).
         await self._w(keys.UUID_CHR_OTA, bytes([keys.FRAME_START]) + struct.pack("<I", len(data)))
         chunk = self._chunk(5)  # DATA header = op + u32 offset
@@ -168,8 +199,9 @@ class BadgeLink:
             off += len(part)
             if on_progress:
                 on_progress(off, n)
-        # END: the badge applies the swap and reboots ~1.2 s later, so the link
-        # drops shortly after — a write/disconnect error here is expected/success.
+        # END: the badge verifies the image, marks the slot pending, and reboots
+        # ~1.2 s later, so the link drops shortly after — a write/disconnect error
+        # here is expected/success.
         try:
             await self._w(keys.UUID_CHR_OTA, bytes([keys.FRAME_END]) + struct.pack("<I", crc))
         except Exception:

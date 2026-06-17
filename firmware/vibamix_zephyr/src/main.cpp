@@ -5,6 +5,8 @@
  */
 
 #include <cmsis_core.h>
+#include <hal/nrf_wdt.h>
+#include <zephyr/devicetree.h>
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/hwinfo.h>
@@ -84,6 +86,28 @@ static inline bool debugger_attached(void)
 	return (DCB->DHCSR & DCB_DHCSR_C_DEBUGEN_Msk) != 0;
 }
 
+// The bootloader arms wdt31 (only) when chain-loading an unconfirmed trial image
+// and leaves it running across the jump. We feed it directly via the HAL (the
+// Zephyr driver can't feed a channel it didn't install) once a healthy boot is
+// confirmed; before that point the dog runs unfed, so an image that hangs during
+// early bring-up is reset and rolled back by the bootloader.
+static NRF_WDT_Type *const s_wdt = (NRF_WDT_Type *)DT_REG_ADDR(DT_NODELABEL(wdt31));
+
+static void wdt_feed_fn(struct k_timer *t)
+{
+	ARG_UNUSED(t);
+	nrf_wdt_reload_request_set(s_wdt, NRF_WDT_RR0);
+}
+static K_TIMER_DEFINE(s_wdt_timer, wdt_feed_fn, NULL);
+
+// Start keeping the watchdog fed for the rest of this awake session. It pauses
+// itself in System OFF (WDT_OPT_PAUSE_IN_SLEEP), so deep sleep is safe.
+static void wdt_keepalive_start(void)
+{
+	nrf_wdt_reload_request_set(s_wdt, NRF_WDT_RR0);
+	k_timer_start(&s_wdt_timer, K_SECONDS(2), K_SECONDS(2));
+}
+
 int main(void)
 {
 	printk("Starting vibamix\n");
@@ -115,9 +139,14 @@ int main(void)
 	s_mesh.init(&s_gui, &s_leds);
 
 	// Reaching here means BLE/mesh came up, so a freshly-OTA'd image is healthy:
-	// confirm it so MCUboot keeps it (no-op on a normal boot). An image that
-	// crashes/resets before this point is reverted by MCUboot.
+	// confirm THIS slot in bl_state so the bootloader keeps it (idempotent no-op
+	// on a normal boot). An image that crashes/hangs before this point fails to
+	// confirm — the bootloader's attempt counter + watchdog then roll it back.
 	ota_confirm_on_boot();
+
+	// Now that we've confirmed, keep the watchdog fed (it was running unfed up to
+	// this point to catch a hung bring-up). No-op if the bootloader didn't arm it.
+	wdt_keepalive_start();
 
 	if (!config_mode)
 	{

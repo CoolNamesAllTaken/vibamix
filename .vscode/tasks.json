@@ -11,6 +11,7 @@
             "args": [
                 "build",
                 "-b", "vibamix_xiao/nrf54l15/cpuapp",
+                "--no-sysbuild",
                 "--",
                 "-DBOARD_ROOT=${workspaceFolder}/firmware/vibamix_zephyr"
             ],
@@ -38,6 +39,7 @@
                 "build",
                 "-p", "always",
                 "-b", "vibamix_xiao/nrf54l15/cpuapp",
+                "--no-sysbuild",
                 "--",
                 "-DBOARD_ROOT=${workspaceFolder}/firmware/vibamix_zephyr"
             ],
@@ -55,21 +57,47 @@
             "problemMatcher": ["$gcc"]
         },
         {
-            // MCUboot is enabled, so the app must be a *signed* image in slot0 and
-            // MCUboot must be present at 0x0 — the debugger can no longer just `load`
-            // the unsigned ELF. This task builds + flashes the signed image (west flash
-            // programs both mcuboot and zephyr.signed.hex per build/domains.yaml), then
-            // serves GDB. Flash + server share the probe, so run them in one task.
-            // If a server is already listening (debug restart), attach to it instead.
-            "label": "probe-rs GDB server",
-            // "process" (not "shell"): VS Code execs bash directly with these args,
-            // so the single quotes inside the script aren't re-quoted/mangled by the
-            // outer login shell.
-            "type": "process",
-            "command": "bash",
+            // One-time setup: program the custom first-stage bootloader at 0x0 with a
+            // full chip erase (clears any old MCUboot + stale partitions; the flash map
+            // changed). The BL persists across app reflashes — debugging only loads the
+            // app into slot A — so you normally run this once per board. Build the BL
+            // first: west build -b vibamix_xiao/nrf54l15/cpuapp --no-sysbuild -d build/bl
+            //   ../bootloader -- -DBOARD_ROOT=$(pwd)
+            "label": "Flash bootloader (one-time)",
+            "type": "shell",
+            "command": "west",
             "args": [
-                "-c",
-                "if nc -z ::1 1337 2>/dev/null || nc -z 127.0.0.1 1337 2>/dev/null; then echo 'Firing up GDB stub'; exit 0; fi; west build && west flash && exec '${workspaceFolder}/firmware/vibamix_zephyr/boards/pants_for_birds/vibamix_xiao/support/probe-rs-wrapper' gdb --chip nRF54L15"
+                "flash",
+                "--erase",
+                "-d", "build/bl"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/firmware/vibamix_zephyr",
+                "env": {
+                    "PATH": "/opt/nordic/ncs/toolchains/0c0f19d91c/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/usr/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/usr/local/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/nanopb/generator-bin:/opt/nordic/ncs/toolchains/0c0f19d91c/nrfutil/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk/arm-zephyr-eabi/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk/riscv64-zephyr-elf/bin:${env:PATH}",
+                    "ZEPHYR_TOOLCHAIN_VARIANT": "zephyr",
+                    "ZEPHYR_SDK_INSTALL_DIR": "/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk",
+                    "ZEPHYR_BASE": "/opt/nordic/ncs/v3.3.0/zephyr",
+                    "NRFUTIL_HOME": "/opt/nordic/ncs/toolchains/0c0f19d91c/nrfutil/home"
+                }
+            },
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            // The custom first-stage bootloader lives at 0x0 (flashed once over SWD);
+            // the app is linked into slot A. The debugger just `load`s the unsigned app
+            // ELF to slot A (see launch.json) — no MCUboot, no signing, no west flash.
+            // This task only starts the probe-rs GDB server. The wrapper is idempotent:
+            // if a server is already listening (debug restart) it prints the sentinel
+            // and exits so cortex-debug attaches to the existing one.
+            "label": "probe-rs GDB server",
+            "type": "shell",
+            "command": "${workspaceFolder}/firmware/vibamix_zephyr/boards/pants_for_birds/vibamix_xiao/support/probe-rs-wrapper",
+            "args": [
+                "gdb",
+                "--chip",
+                "nRF54L15"
             ],
             "options": {
                 "cwd": "${workspaceFolder}/firmware/vibamix_zephyr",
