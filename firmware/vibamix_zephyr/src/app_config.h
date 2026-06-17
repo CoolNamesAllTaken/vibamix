@@ -20,34 +20,48 @@ extern "C" {
 
 #define APP_CFG_NAME_MAX 32
 #define APP_CFG_FACT_MAX 96
+/* Attendee/table ID: a short human string (e.g. a table number), up to 10 chars. */
+#define APP_CFG_ATTENDEE_MAX 11
 
 /* Stored text screens: a header + a full-screen body, addressed by index. */
 #define APP_CFG_SCREEN_COUNT 20
 #define APP_CFG_HEADER_MAX   48
 #define APP_CFG_BODY_MAX     1024
+/* Image frames (must match BADGE_IMAGE_SLOTS in badge_store.h). */
+#define APP_CFG_IMAGE_SLOTS  4
 
 /* "Displayed screen" kinds (see app_config_set_display / DISPLAY_SCREEN). */
 #define APP_DISP_KIND_TEXT  0
 #define APP_DISP_KIND_IMAGE 1
 
+/* Per-frame LED config: an animation style (see LedPattern codes) + a color. */
+struct frame_led {
+	uint8_t anim;
+	uint8_t r, g, b;
+};
+
 struct badge_screen {
 	char header[APP_CFG_HEADER_MAX];
 	char body[APP_CFG_BODY_MAX];
 	bool present;
+	struct frame_led led;   /* LED animation shown while this frame is displayed */
 };
 
 struct app_config {
 	char    name[APP_CFG_NAME_MAX];
 	char    fun_fact[APP_CFG_FACT_MAX];
+	char    attendee_id[APP_CFG_ATTENDEE_MAX];
 	uint8_t r, g, b;
 	bool    has_color;
 	bool    has_name;
+	bool    has_attendee;
 	/* A user-drawn full-screen image is currently shown. Persisted so the boot
 	 * identity redraw is skipped and the bistable image is preserved. Set when an
 	 * image is rendered; cleared when name/fact text replaces the screen. */
 	bool    has_custom_image;
 
 	struct badge_screen screens[APP_CFG_SCREEN_COUNT];
+	struct frame_led     image_led[APP_CFG_IMAGE_SLOTS];
 
 	/* Last screen commanded to display (kind + index), persisted. */
 	uint8_t disp_kind;
@@ -62,6 +76,7 @@ const struct app_config *app_config_get(void);
 
 void app_config_set_name(const char *s, size_t len);
 void app_config_set_fun_fact(const char *s, size_t len);
+void app_config_set_attendee_id(const char *s, size_t len);
 void app_config_set_color(uint8_t r, uint8_t g, uint8_t b);
 void app_config_set_has_image(bool has_image);
 
@@ -70,6 +85,13 @@ void app_config_set_has_image(bool has_image);
 void app_config_set_screen(uint8_t idx, const char *hdr, size_t hlen,
 			   const char *body, size_t blen);
 const struct badge_screen *app_config_get_screen(uint8_t idx);
+
+/* Per-frame LED animation + color, keyed by (kind, idx) — kind is
+ * APP_DISP_KIND_TEXT (0..SCREEN_COUNT-1) or APP_DISP_KIND_IMAGE (0..IMAGE_SLOTS-1).
+ * get returns false if kind/idx is out of range; *out is the stored config. */
+void app_config_set_frame_led(uint8_t kind, uint8_t idx, uint8_t anim,
+			      uint8_t r, uint8_t g, uint8_t b);
+bool app_config_get_frame_led(uint8_t kind, uint8_t idx, struct frame_led *out);
 
 /* Remember which screen is currently displayed. */
 void app_config_set_display(uint8_t kind, uint8_t idx);

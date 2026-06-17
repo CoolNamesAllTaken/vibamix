@@ -26,6 +26,7 @@ target_sources(app PRIVATE
   src/battery.c
   src/badge_store.c
   src/dither.c
+  src/ota.c
 )
 
 add_subdirectory(../peripherals/epd epd)

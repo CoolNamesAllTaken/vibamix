@@ -20,7 +20,27 @@ static constexpr uint32_t kBlobPeriod = 100;   // frames for one L->R->L bounce 
 static constexpr float    kBlobWidth  = 2.0f;  // blob falloff radius, in LED units
 static constexpr float    kBlobFloor  = 0.10f; // faint floor so the wheel stays visible
 
+// Breathe: triangle-wave brightness period (frames). ~64*40ms ≈ 2.6 s.
+static constexpr uint32_t kBreathePeriod = 64;
+static constexpr uint8_t  kBreatheFloor  = 28;   // dimmest point of the pulse
+// Comet: frames the head dwells on each LED, and per-LED tail falloff.
+static constexpr uint32_t kCometStep = 6;
+static constexpr int      kCometFade = 110;
+// Sparkle: per-frame decay, dim floor, and ~1/N spawn chance.
+static constexpr uint8_t  kSparkDecay = 18;
+static constexpr uint8_t  kSparkFloor = 12;
+
 static const struct device *const s_strip = DEVICE_DT_GET(STRIP_NODE);
+
+// Scale an (already brightness-capped) color by lvl/255.
+static struct led_rgb scale_rgb(struct led_rgb c, uint8_t lvl)
+{
+    struct led_rgb o{};
+    o.r = (uint16_t)c.r * lvl / 255;
+    o.g = (uint16_t)c.g * lvl / 255;
+    o.b = (uint16_t)c.b * lvl / 255;
+    return o;
+}
 
 // WS2812 VDD power gate (P1.07, active-low PMOS); driving it active powers the chain.
 static const struct gpio_dt_spec s_power = GPIO_DT_SPEC_GET(DT_NODELABEL(led_enable), gpios);
@@ -69,12 +89,41 @@ void LEDStrip::set_pattern(LedPattern pattern)
 
 void LEDStrip::set_color(uint8_t r, uint8_t g, uint8_t b)
 {
+    set_anim(LedPattern::Solid, r, g, b);
+}
+
+void LEDStrip::set_anim(LedPattern pattern, uint8_t r, uint8_t g, uint8_t b)
+{
     // Scale to the same brightness cap the animations use (~25%) to keep current
     // and glare down across the 4-LED chain.
     m_color.r = (uint16_t)r * kBrightness / 255;
     m_color.g = (uint16_t)g * kBrightness / 255;
     m_color.b = (uint16_t)b * kBrightness / 255;
-    m_pattern = LedPattern::Solid;
+    m_pattern = pattern;
+}
+
+uint32_t LEDStrip::rand_next()
+{
+    uint32_t x = m_rng;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    m_rng = x ? x : 0x1234abcdu;
+    return m_rng;
+}
+
+LedPattern led_pattern_from_code(uint8_t code)
+{
+    switch (code) {
+    case (uint8_t)LedPattern::Off:     return LedPattern::Off;
+    case (uint8_t)LedPattern::Solid:   return LedPattern::Solid;
+    case (uint8_t)LedPattern::Rainbow: return LedPattern::Rainbow;
+    case (uint8_t)LedPattern::Wheel:   return LedPattern::Wheel;
+    case (uint8_t)LedPattern::Breathe: return LedPattern::Breathe;
+    case (uint8_t)LedPattern::Comet:   return LedPattern::Comet;
+    case (uint8_t)LedPattern::Sparkle: return LedPattern::Sparkle;
+    default:                           return LedPattern::Solid;
+    }
 }
 
 void LEDStrip::render()
@@ -83,6 +132,9 @@ void LEDStrip::render()
     case LedPattern::Solid:   render_solid();   break;
     case LedPattern::Rainbow: render_rainbow(); break;
     case LedPattern::Wheel:   render_wheel();   break;
+    case LedPattern::Breathe: render_breathe(); break;
+    case LedPattern::Comet:   render_comet();   break;
+    case LedPattern::Sparkle: render_sparkle(); break;
     case LedPattern::Off:
     default:                  render_off();     break;
     }
@@ -158,6 +210,53 @@ void LEDStrip::render_wheel()
         }
         const uint8_t val = (uint8_t)(kBrightness * factor);
         m_pixels[i] = hsv_to_rgb(hue, val);
+    }
+    commit();
+}
+
+void LEDStrip::render_breathe()
+{
+    // Triangle-wave brightness from kBreatheFloor..255 over kBreathePeriod frames.
+    const uint32_t c    = m_tick % kBreathePeriod;
+    const uint32_t half = kBreathePeriod / 2;
+    const uint32_t tri  = (c < half) ? c : (kBreathePeriod - c);  // 0..half
+    const uint8_t lvl = (uint8_t)(kBreatheFloor +
+                                  (uint32_t)(255 - kBreatheFloor) * tri / half);
+    const struct led_rgb px = scale_rgb(m_color, lvl);
+    for (size_t i = 0; i < STRIP_NUM_PIXELS; i++) {
+        m_pixels[i] = px;
+    }
+    commit();
+}
+
+void LEDStrip::render_comet()
+{
+    // A bright head dwells kCometStep frames per LED and wraps; pixels behind it
+    // fade out, giving a comet with a short tail.
+    const uint32_t pos = (m_tick / kCometStep) % STRIP_NUM_PIXELS;
+    for (size_t i = 0; i < STRIP_NUM_PIXELS; i++) {
+        const uint32_t behind = (pos + STRIP_NUM_PIXELS - i) % STRIP_NUM_PIXELS;
+        int lvl = 255 - (int)behind * kCometFade;
+        if (lvl < 0) {
+            lvl = 0;
+        }
+        m_pixels[i] = scale_rgb(m_color, (uint8_t)lvl);
+    }
+    commit();
+}
+
+void LEDStrip::render_sparkle()
+{
+    // Decay each pixel, occasionally relight a random one to full, keep a dim floor.
+    for (size_t i = 0; i < STRIP_NUM_PIXELS; i++) {
+        m_level[i] = (m_level[i] > kSparkDecay) ? (uint8_t)(m_level[i] - kSparkDecay) : 0;
+    }
+    if ((rand_next() & 0x7) == 0) {
+        m_level[rand_next() % STRIP_NUM_PIXELS] = 255;
+    }
+    for (size_t i = 0; i < STRIP_NUM_PIXELS; i++) {
+        const uint8_t lvl = m_level[i] > kSparkFloor ? m_level[i] : kSparkFloor;
+        m_pixels[i] = scale_rgb(m_color, lvl);
     }
     commit();
 }

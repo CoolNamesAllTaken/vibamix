@@ -2,6 +2,7 @@
 #include "app_config.h"
 #include "badge_store.h"
 #include "image_xfer.h"
+#include "ota.h"
 
 #include <string.h>
 #include <zephyr/bluetooth/conn.h>
@@ -16,6 +17,9 @@
 #define VBX_UUID_SCREEN  BT_UUID_128_ENCODE(0xf0de0004, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
 #define VBX_UUID_IMGSLOT BT_UUID_128_ENCODE(0xf0de0005, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
 #define VBX_UUID_DISPLAY BT_UUID_128_ENCODE(0xf0de0006, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
+#define VBX_UUID_ATTND   BT_UUID_128_ENCODE(0xf0de0007, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
+#define VBX_UUID_FRMLED  BT_UUID_128_ENCODE(0xf0de0008, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
+#define VBX_UUID_OTA     BT_UUID_128_ENCODE(0xf0de0009, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
 
 static const struct bt_uuid_128 vbx_svc_uuid     = BT_UUID_INIT_128(VBX_UUID_SVC);
 static const struct bt_uuid_128 vbx_img_uuid     = BT_UUID_INIT_128(VBX_UUID_IMG);
@@ -23,6 +27,9 @@ static const struct bt_uuid_128 vbx_name_uuid    = BT_UUID_INIT_128(VBX_UUID_NAM
 static const struct bt_uuid_128 vbx_screen_uuid  = BT_UUID_INIT_128(VBX_UUID_SCREEN);
 static const struct bt_uuid_128 vbx_imgslot_uuid = BT_UUID_INIT_128(VBX_UUID_IMGSLOT);
 static const struct bt_uuid_128 vbx_display_uuid = BT_UUID_INIT_128(VBX_UUID_DISPLAY);
+static const struct bt_uuid_128 vbx_attnd_uuid   = BT_UUID_INIT_128(VBX_UUID_ATTND);
+static const struct bt_uuid_128 vbx_frmled_uuid  = BT_UUID_INIT_128(VBX_UUID_FRMLED);
+static const struct bt_uuid_128 vbx_ota_uuid     = BT_UUID_INIT_128(VBX_UUID_OTA);
 
 /* Chunk framing op bytes, shared by the image/image-slot/screen characteristics. */
 #define OP_START 0x01
@@ -244,6 +251,90 @@ static ssize_t name_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 	return len;
 }
 
+/* f0de0007 — attendee/table ID (UTF-8 string, <=10 chars). */
+static ssize_t attendee_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+			      const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
+{
+	if (offset != 0) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+	}
+	if (s_cb && s_cb->on_attendee) {
+		s_cb->on_attendee((const char *)buf, len);
+	}
+	note_activity();
+	return len;
+}
+
+/* f0de0008 — per-frame LED: kind, idx, anim, r, g, b. */
+static ssize_t frmled_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+			    const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
+{
+	const uint8_t *p = buf;
+
+	if (offset != 0) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+	}
+	if (len < 6) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+	}
+	if (s_cb && s_cb->on_frame_led) {
+		s_cb->on_frame_led(p[0], p[1], p[2], p[3], p[4], p[5]);
+	}
+	note_activity();
+	return len;
+}
+
+/* f0de0009 — OTA firmware update. Streams a signed MCUboot image into slot1.
+ * START = op,le32 total_size ; DATA = op,le32 offset,bytes ; END = op,le32 crc32.
+ * (u32 fields — the image is ~360 KB, well beyond the u16 used elsewhere.) */
+static ssize_t ota_write_char(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+			      const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
+{
+	const uint8_t *p = buf;
+
+	if (offset != 0) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+	}
+	if (len < 5) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+	}
+
+	switch (p[0]) {
+	case OP_START: {
+		uint32_t total = sys_get_le32(p + 1);
+
+		if (ota_begin(total) != 0) {
+			return BT_GATT_ERR(BT_ATT_ERR_UNLIKELY);
+		}
+		if (s_cb && s_cb->on_ota_start) {
+			s_cb->on_ota_start(total);
+		}
+		break;
+	}
+	case OP_DATA:
+		if (ota_write(sys_get_le32(p + 1), p + 5, len - 5) != 0) {
+			return BT_GATT_ERR(BT_ATT_ERR_UNLIKELY);
+		}
+		break;
+	case OP_END: {
+		int err = ota_finish(sys_get_le32(p + 1));
+
+		if (s_cb && s_cb->on_ota_end) {
+			s_cb->on_ota_end(err == 0);
+		}
+		if (err) {
+			return BT_GATT_ERR(BT_ATT_ERR_UNLIKELY);
+		}
+		break;
+	}
+	default:
+		return BT_GATT_ERR(BT_ATT_ERR_NOT_SUPPORTED);
+	}
+
+	note_activity();
+	return len;
+}
+
 BT_GATT_SERVICE_DEFINE(vbx_cfg_svc,
 	BT_GATT_PRIMARY_SERVICE(&vbx_svc_uuid),
 	BT_GATT_CHARACTERISTIC(&vbx_img_uuid.uuid,
@@ -261,4 +352,13 @@ BT_GATT_SERVICE_DEFINE(vbx_cfg_svc,
 	BT_GATT_CHARACTERISTIC(&vbx_display_uuid.uuid,
 			       BT_GATT_CHRC_WRITE,
 			       BT_GATT_PERM_WRITE, NULL, display_write, NULL),
+	BT_GATT_CHARACTERISTIC(&vbx_attnd_uuid.uuid,
+			       BT_GATT_CHRC_WRITE,
+			       BT_GATT_PERM_WRITE, NULL, attendee_write, NULL),
+	BT_GATT_CHARACTERISTIC(&vbx_frmled_uuid.uuid,
+			       BT_GATT_CHRC_WRITE,
+			       BT_GATT_PERM_WRITE, NULL, frmled_write, NULL),
+	BT_GATT_CHARACTERISTIC(&vbx_ota_uuid.uuid,
+			       BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP,
+			       BT_GATT_PERM_WRITE, NULL, ota_write_char, NULL),
 );

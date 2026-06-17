@@ -24,6 +24,8 @@
 #define OP_SCREEN_HDR    BT_MESH_MODEL_OP_3(0x08, VIBAMIX_CID) /* u8 idx, header */
 #define OP_SCREEN_BODY   BT_MESH_MODEL_OP_3(0x09, VIBAMIX_CID) /* u8 idx,seq,last, body */
 #define OP_DISPLAY       BT_MESH_MODEL_OP_3(0x0A, VIBAMIX_CID) /* u8 kind, idx */
+#define OP_SET_ATTENDEE  BT_MESH_MODEL_OP_3(0x0B, VIBAMIX_CID) /* UTF-8 string */
+#define OP_SET_FRAME_LED BT_MESH_MODEL_OP_3(0x0C, VIBAMIX_CID) /* kind,idx,anim,r,g,b */
 
 static const struct mesh_config_handlers *s_cfg;
 
@@ -182,6 +184,31 @@ static int handle_display(const struct bt_mesh_model *model,
 	return 0;
 }
 
+static int handle_set_attendee(const struct bt_mesh_model *model,
+			       struct bt_mesh_msg_ctx *ctx, struct net_buf_simple *buf)
+{
+	if (s_cfg && s_cfg->set_attendee) {
+		s_cfg->set_attendee((const char *)buf->data, buf->len);
+	}
+	return 0;
+}
+
+static int handle_set_frame_led(const struct bt_mesh_model *model,
+				struct bt_mesh_msg_ctx *ctx, struct net_buf_simple *buf)
+{
+	uint8_t kind = net_buf_simple_pull_u8(buf);
+	uint8_t idx  = net_buf_simple_pull_u8(buf);
+	uint8_t anim = net_buf_simple_pull_u8(buf);
+	uint8_t r    = net_buf_simple_pull_u8(buf);
+	uint8_t g    = net_buf_simple_pull_u8(buf);
+	uint8_t b    = net_buf_simple_pull_u8(buf);
+
+	if (s_cfg && s_cfg->set_frame_led) {
+		s_cfg->set_frame_led(kind, idx, anim, r, g, b);
+	}
+	return 0;
+}
+
 static const struct bt_mesh_model_op vibamix_op[] = {
 	{ OP_SET_NAME,      BT_MESH_LEN_MIN(0),   handle_set_name },
 	{ OP_SET_FUN_FACT,  BT_MESH_LEN_MIN(0),   handle_set_fun_fact },
@@ -193,6 +220,8 @@ static const struct bt_mesh_model_op vibamix_op[] = {
 	{ OP_SCREEN_HDR,    BT_MESH_LEN_MIN(1),   handle_screen_hdr },
 	{ OP_SCREEN_BODY,   BT_MESH_LEN_MIN(3),   handle_screen_body },
 	{ OP_DISPLAY,       BT_MESH_LEN_EXACT(2), handle_display },
+	{ OP_SET_ATTENDEE,  BT_MESH_LEN_MIN(0),   handle_set_attendee },
+	{ OP_SET_FRAME_LED, BT_MESH_LEN_EXACT(6), handle_set_frame_led },
 	BT_MESH_MODEL_OP_END,
 };
 

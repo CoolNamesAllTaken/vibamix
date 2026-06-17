@@ -34,6 +34,13 @@ public:
     void on_screen(uint8_t idx, const char *hdr, size_t hlen,
                    const char *body, size_t blen);
     void on_display(uint8_t kind, uint8_t idx);
+    // OTA: show a status screen while the firmware image streams in / applies.
+    void on_ota_start(uint32_t total);
+    void on_ota_end(bool ok);
+    // Config-command bridges for the attendee/table ID and per-frame LED.
+    void on_attendee(const char *s, size_t len);
+    void on_frame_led(uint8_t kind, uint8_t idx, uint8_t anim,
+                      uint8_t r, uint8_t g, uint8_t b);
 
 private:
     GUI      *m_gui{nullptr};

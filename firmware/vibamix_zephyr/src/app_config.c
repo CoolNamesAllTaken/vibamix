@@ -52,6 +52,14 @@ static int cfg_set(const char *key, size_t len, settings_read_cb read_cb, void *
 		}
 		return 0;
 	}
+	if (settings_name_steq(key, "aid", &next) && !next) {
+		rc = read_cb(cb_arg, s_cfg.attendee_id, sizeof(s_cfg.attendee_id) - 1);
+		if (rc > 0) {
+			s_cfg.attendee_id[rc] = '\0';
+			s_cfg.has_attendee = true;
+		}
+		return 0;
+	}
 	if (settings_name_steq(key, "disp", &next) && !next) {
 		uint8_t d[2];
 
@@ -63,8 +71,24 @@ static int cfg_set(const char *key, size_t len, settings_read_cb read_cb, void *
 		}
 		return 0;
 	}
+	if (settings_name_steq(key, "iled", &next) && next) {
+		/* next = "<slot>" — per-image-frame LED config (4 bytes). */
+		char *end;
+		long idx = strtol(next, &end, 10);
+
+		if (idx < 0 || idx >= APP_CFG_IMAGE_SLOTS || *end != '\0') {
+			return -ENOENT;
+		}
+		uint8_t v[4];
+
+		rc = read_cb(cb_arg, v, sizeof(v));
+		if (rc == sizeof(v)) {
+			s_cfg.image_led[idx] = (struct frame_led){ v[0], v[1], v[2], v[3] };
+		}
+		return 0;
+	}
 	if (settings_name_steq(key, "scr", &next) && next) {
-		/* next = "<idx>/<field>" where field is 'h' (header) or 'b' (body). */
+		/* next = "<idx>/<field>"; field is 'h' (header), 'b' (body) or 'l' (LED). */
 		char *end;
 		long idx = strtol(next, &end, 10);
 
@@ -87,6 +111,15 @@ static int cfg_set(const char *key, size_t len, settings_read_cb read_cb, void *
 			if (rc >= 0) {
 				scr->body[rc] = '\0';
 				scr->present = true;
+			}
+			return 0;
+		}
+		if (strcmp(field, "l") == 0) {
+			uint8_t v[4];
+
+			rc = read_cb(cb_arg, v, sizeof(v));
+			if (rc == sizeof(v)) {
+				scr->led = (struct frame_led){ v[0], v[1], v[2], v[3] };
 			}
 			return 0;
 		}
@@ -131,6 +164,18 @@ void app_config_set_fun_fact(const char *s, size_t len)
 	settings_save_one(CFG_SUBTREE "/fact", s_cfg.fun_fact, len);
 	printk("cfg: fun_fact=\"%s\"\n", s_cfg.fun_fact);
 	app_config_set_has_image(false);
+}
+
+void app_config_set_attendee_id(const char *s, size_t len)
+{
+	if (len >= sizeof(s_cfg.attendee_id)) {
+		len = sizeof(s_cfg.attendee_id) - 1;
+	}
+	memcpy(s_cfg.attendee_id, s, len);
+	s_cfg.attendee_id[len] = '\0';
+	s_cfg.has_attendee = (len > 0);
+	settings_save_one(CFG_SUBTREE "/aid", s_cfg.attendee_id, len);
+	printk("cfg: attendee_id=\"%s\"\n", s_cfg.attendee_id);
 }
 
 void app_config_set_color(uint8_t r, uint8_t g, uint8_t b)
@@ -193,6 +238,43 @@ const struct badge_screen *app_config_get_screen(uint8_t idx)
 		return NULL;
 	}
 	return &s_cfg.screens[idx];
+}
+
+void app_config_set_frame_led(uint8_t kind, uint8_t idx, uint8_t anim,
+			      uint8_t r, uint8_t g, uint8_t b)
+{
+	struct frame_led *led;
+	char key[24];
+
+	if (kind == APP_DISP_KIND_TEXT && idx < APP_CFG_SCREEN_COUNT) {
+		led = &s_cfg.screens[idx].led;
+		snprintf(key, sizeof(key), CFG_SUBTREE "/scr/%u/l", idx);
+	} else if (kind == APP_DISP_KIND_IMAGE && idx < APP_CFG_IMAGE_SLOTS) {
+		led = &s_cfg.image_led[idx];
+		snprintf(key, sizeof(key), CFG_SUBTREE "/iled/%u", idx);
+	} else {
+		return;
+	}
+
+	*led = (struct frame_led){ anim, r, g, b };
+	uint8_t v[4] = { anim, r, g, b };
+
+	settings_save_one(key, v, sizeof(v));
+	printk("cfg: frame led kind=%u idx=%u anim=%u #%02x%02x%02x\n",
+	       kind, idx, anim, r, g, b);
+}
+
+bool app_config_get_frame_led(uint8_t kind, uint8_t idx, struct frame_led *out)
+{
+	if (kind == APP_DISP_KIND_TEXT && idx < APP_CFG_SCREEN_COUNT) {
+		*out = s_cfg.screens[idx].led;
+		return true;
+	}
+	if (kind == APP_DISP_KIND_IMAGE && idx < APP_CFG_IMAGE_SLOTS) {
+		*out = s_cfg.image_led[idx];
+		return true;
+	}
+	return false;
 }
 
 void app_config_set_display(uint8_t kind, uint8_t idx)

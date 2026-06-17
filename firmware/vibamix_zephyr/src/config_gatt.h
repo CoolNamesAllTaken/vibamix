@@ -1,6 +1,7 @@
 #ifndef VIBAMIX_CONFIG_GATT_H
 #define VIBAMIX_CONFIG_GATT_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -28,6 +29,11 @@ struct config_gatt_callbacks {
 	void (*on_screen)(uint8_t idx, const char *hdr, size_t hlen,
 			  const char *body, size_t blen);
 	void (*on_display)(uint8_t kind, uint8_t idx);
+	void (*on_attendee)(const char *s, size_t len); /* set attendee/table ID */
+	void (*on_frame_led)(uint8_t kind, uint8_t idx, uint8_t anim,
+			     uint8_t r, uint8_t g, uint8_t b);
+	void (*on_ota_start)(uint32_t total);  /* OTA began — show "updating" screen */
+	void (*on_ota_end)(bool ok);           /* OTA finished — show "rebooting"/failed */
 };
 
 /* Register the callbacks invoked from GATT write handlers. Pointer must outlive

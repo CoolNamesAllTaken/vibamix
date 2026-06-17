@@ -76,6 +76,9 @@ Notes:
 | **Screen** | `f0de0004-…` | Write | Store one of **20 text screens** (header + body), framed (see §7). |
 | **Image‑slot** | `f0de0005-…` | Write, Write‑Without‑Response | Upload an image into one of **4 stored slots**, 1‑bit B/W or 2‑bit grayscale (see §8). |
 | **Display** | `f0de0006-…` | Write | Show a stored screen: `u8 kind, u8 idx` (see §9). |
+| **Attendee‑ID** | `f0de0007-…` | Write | UTF‑8 string, **≤ 10 bytes** — the table/seat ID shown on the identity screen (see §9.1). |
+| **Frame‑LED** | `f0de0008-…` | Write | Per‑frame LED animation + color: `u8 kind, u8 idx, u8 anim, u8 r, u8 g, u8 b` (see §9.2). |
+| **OTA** | `f0de0009-…` | Write, Write‑Without‑Response | Firmware update: stream a signed MCUboot image into slot 1, then reboot/swap (see §10). |
 
 (All UUIDs share the base `…-4b1c-4e2a-9a11-a1b2c3d4e5f6`.) All multi‑byte integers in payloads are
 **little‑endian**.
@@ -277,14 +280,96 @@ Write 2 bytes to the **Display** characteristic (`f0de0006`): `u8 kind, u8 idx`.
 The selection persists, and the rendered screen takes over the panel (the config countdown stops
 repainting). Displaying an empty slot/screen is a no‑op.
 
+### 9.1 Attendee / table ID
+
+Write a UTF‑8 string (no prefix/terminator) to the **Attendee‑ID** characteristic (`f0de0007`):
+
+```js
+await attndChar.writeValueWithResponse(new TextEncoder().encode('12'));   // e.g. table 12
+```
+
+- Stored **≤ 10 bytes** (extra dropped); persists across power cycles.
+- Shown on the **identity screen** as `Table <id>` (below the name). Writing it redraws identity.
+
+### 9.2 Per‑frame LED animation + color
+
+Each frame (the 20 text screens and the 4 image slots) can carry its own LED animation + color,
+shown on the 4 badge LEDs **while that frame is the displayed one**. Write 6 bytes to the
+**Frame‑LED** characteristic (`f0de0008`): `u8 kind, u8 idx, u8 anim, u8 r, u8 g, u8 b`.
+
+- `kind` = `0` text screen (`idx` 0–19) or `1` image slot (`idx` 0–3) — same as Display.
+- `anim` codes: `0` Off/*no override*, `1` Solid, `2` Rainbow, `3` Wheel, `4` Breathe, `5` Comet,
+  `6` Sparkle. Solid/Breathe/Comet/Sparkle use `r,g,b`; Rainbow/Wheel ignore it (firmware caps
+  brightness).
+- Persists per frame; applied when that frame is displayed (live if it's the current frame). `anim=0`
+  means "no override" (fall back to the badge default), not a forced blackout. LEDs run during the
+  badge's brief awake window, not while a phone is connected.
+
+### 9.3 Connected indicator
+
+While a phone is connected over this service the badge shows a **"Connected"** screen and **does not
+time out** — it stays in config until the link drops. After disconnect it shows the **identity
+screen with a countdown bar** (time to sleep, reset by the mesh heartbeat); when that elapses it
+redraws a clean identity screen and sleeps.
+
 ---
 
-## 10. Mesh control & heartbeat (event‑wide)
+## 10. Firmware update (OTA)
+
+Stream a new **signed MCUboot image** into the badge's secondary slot, then let MCUboot apply it on
+reboot. The badge runs MCUboot in **swap‑with‑revert** mode: the new image is swapped in and must
+self‑confirm on boot, or MCUboot reverts to the previous one.
+
+**Image to send:** the signed update binary from the build —
+`build/vibamix_zephyr/zephyr/zephyr.signed.bin` (raw, ~360 KB). Do **not** send `merged.hex` or the
+unsigned `zephyr.bin`. The image must be signed with the same key the running bootloader trusts.
+
+**Characteristic:** OTA `f0de0009-…` (Write / Write‑Without‑Response). Framed like the image upload
+but with **u32** size/offset (the image far exceeds 64 KB). All fields little‑endian:
+
+| Op | Bytes | Meaning |
+|----|-------|---------|
+| START `0x01` | `u8 op` `u32 total_size` | Begin; opens slot 1 and shows "Updating firmware". |
+| DATA  `0x02` | `u8 op` `u32 offset` `bytes…` | Append a chunk. `offset` **must equal** the running byte count (send in order). Chunk ≤ `ATT_MTU − 3 − 5`. |
+| END   `0x03` | `u8 op` `u32 crc32` | CRC‑32/IEEE over the **whole** image. Badge verifies size+CRC, requests the swap, and reboots ~1.2 s later. |
+
+**Behavior & rules**
+- Send DATA **in order**; a gap (offset ≠ bytes received) aborts the transfer. Reliable writes
+  (Write‑With‑Response) are recommended.
+- On END the badge verifies the byte count and CRC; if either fails it returns an ATT error and
+  stays on the old firmware. MCUboot independently verifies the signature on swap — a corrupt or
+  unsigned image will not be booted.
+- After a successful END the link **drops** when the badge reboots (~1.2 s) — treat a disconnect
+  right after END as success, then re‑scan/reconnect.
+- The new image **self‑confirms** once it boots far enough to bring BLE/mesh up; an image that
+  crashes/resets before that is **reverted** by MCUboot on the next boot. (There is no watchdog, so
+  an image that *hangs* without resetting must be recovered over SWD.)
+- Do this in config mode (badge awake); each DATA resets the awake window so it won't sleep mid‑update.
+
+Upload sequence (JS):
+```js
+const OTA = 'f0de0009-4b1c-4e2a-9a11-a1b2c3d4e5f6';
+const c = await svc.getCharacteristic(OTA);
+const u32 = v => { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, v, true); return b; };
+await c.writeValueWithResponse(Uint8Array.of(0x01, ...u32(img.length)));        // START
+const CH = 240;                                                                 // ≤ MTU-3-5
+for (let off = 0; off < img.length; off += CH) {
+  const part = img.slice(off, off + CH);
+  await c.writeValueWithResponse(Uint8Array.of(0x02, ...u32(off), ...part));    // DATA
+}
+await c.writeValueWithResponse(Uint8Array.of(0x03, ...u32(crc32(img))));        // END (badge reboots)
+```
+
+---
+
+## 11. Mesh control & heartbeat (event‑wide)
 
 Separately from the per‑badge GATT path, an event controller can broadcast over the **mesh** to all
-badges at once. Mesh‑reachable commands: **set name**, **set text screen**, **display screen**.
-**Image uploads are GATT‑only.** Mesh text/display delivery is **best‑effort** (unacked flooding) —
-use GATT when you need a guaranteed result.
+badges at once. Mesh‑reachable commands: **set name**, **set text screen**, **display screen**,
+**set attendee/table ID**, **set per‑frame LED**. **Image uploads are GATT‑only.** Mesh
+text/display delivery is **best‑effort** (unacked flooding) — use GATT when you need a guaranteed
+result. (Vendor opcodes, company ID `0x0059`: name `0x01`, set‑screen `0x08`/`0x09`, display `0x0A`,
+attendee `0x0B`, frame‑LED `0x0C` with the same `kind,idx,anim,r,g,b` payload as the GATT char.)
 
 **Heartbeat:** the controller sends an *event heartbeat* mesh message about **once a minute**. A
 badge that is **already awake** resets its ~3‑minute window on each heartbeat, so it stays awake to
@@ -294,7 +379,7 @@ keep an open window open.
 
 ---
 
-## 11. Limitations & gotchas (please read)
+## 12. Limitations & gotchas (please read)
 
 - **No success/failure response.** The Config Service has no notify characteristic, so the app
   cannot read back whether the CRC passed. Treat a completed write sequence as "sent," and tell the
@@ -312,7 +397,7 @@ keep an open window open.
 
 ---
 
-## 12. Quick reference
+## 13. Quick reference
 
 ```
 Device name (advertised in config mode): vibamix-<CODE>   e.g. vibamix-1A2F
@@ -324,6 +409,9 @@ Service     f0de0001-…   (base …-4b1c-4e2a-9a11-a1b2c3d4e5f6)
   Screen    f0de0004-…   write  (store text screen)
   Image-slot f0de0005-…  write / write-no-response  (store image slot)
   Display   f0de0006-…   write  u8 kind, u8 idx
+  Attendee  f0de0007-…   write UTF-8, <=10 bytes  (table/seat ID -> identity screen)
+  Frame-LED f0de0008-…   write  u8 kind, u8 idx, u8 anim, u8 r, u8 g, u8 b
+  OTA       f0de0009-…   write / write-no-response  (signed firmware -> slot1, reboot)
 
 Image (f0de0002) / Image-slot (f0de0005) frames (little-endian):
   Image      START 0x01 | u16 size(=5808) | u16 w(=176) | u16 h(=264)
@@ -337,11 +425,21 @@ Screen (f0de0004) frames:
   END   0x03
 
 Display (f0de0006):  u8 kind(0=text screen,1=image slot) | u8 idx
+Attendee (f0de0007): UTF-8 string, <=10 bytes
+Frame-LED (f0de0008): u8 kind | u8 idx | u8 anim | u8 r | u8 g | u8 b
+  anim: 0=off/no-override 1=solid 2=rainbow 3=wheel 4=breathe 5=comet 6=sparkle
+
+OTA (f0de0009) frames (little-endian, u32 size/offset — image ~360 KB):
+  START 0x01 | u32 total_size
+  DATA  0x02 | u32 offset | bytes...      (offset == bytes sent so far; in order)
+  END   0x03 | u32 crc32(IEEE over whole image)
+  Send build/vibamix_zephyr/zephyr/zephyr.signed.bin; badge swaps + reboots ~1.2 s after END.
 
 1bpp framebuffer: 5808 bytes = 264 rows x 22 bytes, MSB=leftmost, bit 1=white / 0=black.
   Pack landscape (dx∈0..263, dy∈0..175): idx = (263-dx)*22 + (dy>>3); mask = 0x80>>(dy&7).
 2-bit grayscale: 11616 bytes, 4 px/byte MSB-first, pixel_index=dy*264+dx, level 0=black..3=white.
 
-Mesh (event-wide broadcast): set-name, set-screen, display-screen (best-effort); image = GATT only.
+Mesh (event-wide broadcast): set-name, set-screen, display-screen, set-attendee(0x0B),
+  set-frame-led(0x0C) (best-effort); image = GATT only.
   Heartbeat (~60s) keeps an already-awake badge awake; cannot wake a sleeping badge.
 ```

@@ -10,13 +10,20 @@
 
 // Selectable LED behaviors. Add a value here + a render_*() method + a switch
 // case in render() to introduce a new pattern; mesh/app code commands it via
-// set_pattern().
+// set_pattern() / set_anim(). The numeric values are the on-wire animation code
+// (per-frame LED config + SET_FRAME_LED) — keep them stable.
 enum class LedPattern : uint8_t {
-    Off,        // strip blanked
-    Solid,      // single brightness-scaled color (see set_color)
-    Rainbow,    // rotating dim rainbow
-    Wheel,      // scrolling RGB wheel with a soft blob bouncing left<->right
+    Off     = 0,  // strip blanked
+    Solid   = 1,  // single brightness-scaled color (see set_color)
+    Rainbow = 2,  // rotating dim rainbow (color ignored)
+    Wheel   = 3,  // scrolling RGB wheel with a soft blob bouncing (color ignored)
+    Breathe = 4,  // chosen color eased up/down in brightness (~2.5 s)
+    Comet   = 5,  // chosen-color dot runs across with a fading tail, wrapping
+    Sparkle = 6,  // chosen-color twinkles over a dim floor
 };
+
+// Clamp an on-wire animation code to a valid LedPattern (unknown -> Solid).
+LedPattern led_pattern_from_code(uint8_t code);
 
 class LEDStrip {
 public:
@@ -33,8 +40,12 @@ public:
     LedPattern pattern() const { return m_pattern; }
 
     // Set a solid color (brightness-scaled) and switch to the Solid pattern,
-    // e.g. from a mesh command.
+    // e.g. from the SET_LED_COLOR command.
     void set_color(uint8_t r, uint8_t g, uint8_t b);
+
+    // Select an animation AND its base color together (does not force Solid).
+    // Used to apply a frame's per-frame LED config when it's displayed.
+    void set_anim(LedPattern pattern, uint8_t r, uint8_t g, uint8_t b);
 
     // Draw one frame of the active pattern and advance its animation clock.
     void render();
@@ -53,12 +64,18 @@ private:
     void render_solid();
     void render_rainbow();
     void render_wheel();
+    void render_breathe();
+    void render_comet();
+    void render_sparkle();
     void commit();
+    uint32_t rand_next();
 
     struct led_rgb m_pixels[STRIP_NUM_PIXELS];
     struct led_rgb m_color{};
     LedPattern     m_pattern{LedPattern::Wheel};
     uint32_t       m_tick{0};   // free-running animation frame counter
+    uint8_t        m_level[STRIP_NUM_PIXELS]{};  // per-pixel fade state (comet/sparkle)
+    uint32_t       m_rng{0x1234abcdu};           // xorshift PRNG state (sparkle)
 };
 
 #endif /* VIBAMIX_LED_STRIP_H */

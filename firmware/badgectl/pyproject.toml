@@ -1,0 +1,33 @@
+[tool.poetry]
+name = "badgectl"
+version = "0.1.0"
+description = "Laptop GUI to exercise all vibamix badge GATT + Bluetooth Mesh functions"
+authors = ["vibamix"]
+readme = "README.md"
+packages = [{ include = "badgectl" }]
+
+# System notes:
+#   macOS: first run prompts for Bluetooth permission (System Settings > Privacy).
+#          CoreBluetooth hides MAC addresses — badges are selected by advertised
+#          name "vibamix-XXXX".
+#   Linux: needs BlueZ; run as a user in the `bluetooth` group.
+
+# Python capped <3.14: bleak 0.22.x supports up to 3.13 only. Bump the cap when
+# a bleak release adds 3.14 support.
+[tool.poetry.dependencies]
+python = ">=3.10,<3.14"
+pyqt6 = ">=6.7,<7"
+qasync = ">=0.27,<1"
+bleak = ">=0.22.3,<0.23"
+cryptography = ">=42,<50"
+pillow = ">=10.3,<13"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+
+[tool.poetry.scripts]
+badgectl = "badgectl.__main__:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

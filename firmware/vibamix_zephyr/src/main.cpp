@@ -15,6 +15,7 @@
 #include "GUI.h"
 #include "MeshNode.h"
 #include "LEDStrip.h"
+#include "ota.h"
 
 // How long the LEDs run after a normal boot before the device deep-sleeps. A
 // button press during this window jumps straight into config mode.
@@ -112,6 +113,11 @@ int main(void)
 	// Bring up the mesh node (BT + mesh stack, self-provision, GATT proxy, and
 	// the per-device name used for Web Bluetooth discovery). Non-fatal.
 	s_mesh.init(&s_gui, &s_leds);
+
+	// Reaching here means BLE/mesh came up, so a freshly-OTA'd image is healthy:
+	// confirm it so MCUboot keeps it (no-op on a normal boot). An image that
+	// crashes/resets before this point is reverted by MCUboot.
+	ota_confirm_on_boot();
 
 	if (!config_mode)
 	{

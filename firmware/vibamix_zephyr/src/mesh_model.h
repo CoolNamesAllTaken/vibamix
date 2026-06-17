@@ -30,6 +30,11 @@ struct mesh_config_handlers {
 			   const char *body, size_t blen);
 	/* Display a stored screen: kind 0 = text screen, 1 = image slot. */
 	void (*display_screen)(uint8_t kind, uint8_t idx);
+	/* Set the attendee/table ID string. */
+	void (*set_attendee)(const char *id, size_t len);
+	/* Set a frame's LED animation + color: kind/idx as display_screen. */
+	void (*set_frame_led)(uint8_t kind, uint8_t idx, uint8_t anim,
+			      uint8_t r, uint8_t g, uint8_t b);
 };
 
 /* Register the C++ side callbacks. Pass a pointer with static lifetime. */

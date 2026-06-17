@@ -35,9 +35,15 @@ public:
                        const char *body, size_t blen);
     // Render a stored screen: kind 0 = text screen, 1 = image slot.
     void on_display_screen(uint8_t kind, uint8_t idx);
+    // Set the attendee/table ID (shown on the identity screen).
+    void on_set_attendee_id(const char *id, size_t len);
+    // Set a frame's LED animation + color; applies live if it's the shown frame.
+    void on_set_frame_led(uint8_t kind, uint8_t idx, uint8_t anim,
+                          uint8_t r, uint8_t g, uint8_t b);
 
 private:
     void redraw_identity();
+    void apply_frame_led(uint8_t kind, uint8_t idx);
 
     GUI      *m_gui{nullptr};
     LEDStrip *m_leds{nullptr};

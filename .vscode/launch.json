@@ -12,7 +12,6 @@
             "showDevDebugOutput": "none",
             "overrideLaunchCommands": [
                 "set remote hardware-breakpoint-limit 8",
-                "load",
                 "monitor reset halt",
                 "hbreak main",
                 "continue"
@@ -23,7 +22,6 @@
                 "continue"
             ],
             "overrideResetCommands": [
-                "load",
                 "monitor reset halt",
                 "hbreak main",
                 "continue"

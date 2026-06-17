@@ -55,15 +55,32 @@
             "problemMatcher": ["$gcc"]
         },
         {
+            // MCUboot is enabled, so the app must be a *signed* image in slot0 and
+            // MCUboot must be present at 0x0 — the debugger can no longer just `load`
+            // the unsigned ELF. This task builds + flashes the signed image (west flash
+            // programs both mcuboot and zephyr.signed.hex per build/domains.yaml), then
+            // serves GDB. Flash + server share the probe, so run them in one task.
+            // If a server is already listening (debug restart), attach to it instead.
             "label": "probe-rs GDB server",
-            "type": "shell",
-            "command": "${workspaceFolder}/firmware/vibamix_zephyr/boards/pants_for_birds/vibamix_xiao/support/probe-rs-wrapper",
+            // "process" (not "shell"): VS Code execs bash directly with these args,
+            // so the single quotes inside the script aren't re-quoted/mangled by the
+            // outer login shell.
+            "type": "process",
+            "command": "bash",
             "args": [
-                "gdb",
-                "--chip",
-                "nRF54L15",
-                // "--probe", "6F643EB8"
+                "-c",
+                "if nc -z ::1 1337 2>/dev/null || nc -z 127.0.0.1 1337 2>/dev/null; then echo 'Firing up GDB stub'; exit 0; fi; west build && west flash && exec '${workspaceFolder}/firmware/vibamix_zephyr/boards/pants_for_birds/vibamix_xiao/support/probe-rs-wrapper' gdb --chip nRF54L15"
             ],
+            "options": {
+                "cwd": "${workspaceFolder}/firmware/vibamix_zephyr",
+                "env": {
+                    "PATH": "/opt/nordic/ncs/toolchains/0c0f19d91c/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/usr/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/usr/local/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/nanopb/generator-bin:/opt/nordic/ncs/toolchains/0c0f19d91c/nrfutil/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk/arm-zephyr-eabi/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk/riscv64-zephyr-elf/bin:${env:PATH}",
+                    "ZEPHYR_TOOLCHAIN_VARIANT": "zephyr",
+                    "ZEPHYR_SDK_INSTALL_DIR": "/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk",
+                    "ZEPHYR_BASE": "/opt/nordic/ncs/v3.3.0/zephyr",
+                    "NRFUTIL_HOME": "/opt/nordic/ncs/toolchains/0c0f19d91c/nrfutil/home"
+                }
+            },
             "isBackground": true,
             "problemMatcher": {
                 "owner": "probe-rs",

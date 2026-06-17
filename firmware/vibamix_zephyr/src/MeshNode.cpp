@@ -7,6 +7,7 @@
 #include "image_xfer.h"
 #include "mesh_keys.h"
 #include "mesh_model.h"
+#include "qr_screen.h"
 
 #include <stdio.h>
 #include <zephyr/bluetooth/bluetooth.h>
@@ -71,6 +72,19 @@ static void cb_display(uint8_t kind, uint8_t idx)
     config_mode_on_content();     // a command screen took over; keep awake
 }
 
+static void cb_set_attendee(const char *id, size_t len)
+{
+    if (s_self) { s_self->on_set_attendee_id(id, len); }
+    config_mode_on_heartbeat();
+}
+
+static void cb_set_frame_led(uint8_t kind, uint8_t idx, uint8_t anim,
+                             uint8_t r, uint8_t g, uint8_t b)
+{
+    if (s_self) { s_self->on_set_frame_led(kind, idx, anim, r, g, b); }
+    config_mode_on_heartbeat();
+}
+
 } // extern "C"
 
 static const struct mesh_config_handlers s_handlers = {
@@ -80,6 +94,8 @@ static const struct mesh_config_handlers s_handlers = {
     .heartbeat      = cb_heartbeat,
     .set_screen     = cb_set_screen,
     .display_screen = cb_display,
+    .set_attendee   = cb_set_attendee,
+    .set_frame_led  = cb_set_frame_led,
 };
 
 int MeshNode::init(GUI *gui, LEDStrip *leds)
@@ -157,6 +173,10 @@ void MeshNode::apply_persisted_config()
     if (cfg->has_color && m_leds) {
         m_leds->set_color(cfg->r, cfg->g, cfg->b);
     }
+    // If a frame is the resting content and it has a per-frame LED, that wins.
+    if (cfg->has_disp) {
+        apply_frame_led(cfg->disp_kind, cfg->disp_idx);
+    }
 
     // Single boot-display authority. The panel was left awake by GUI::init().
     if (!m_gui) {
@@ -181,8 +201,20 @@ void MeshNode::redraw_identity()
     }
     const struct app_config *cfg = app_config_get();
     m_gui->wake();
-    m_gui->show_text(cfg->name, cfg->fun_fact);
+    identity_screen_draw(*m_gui, cfg->name, cfg->has_attendee ? cfg->attendee_id : "",
+                         cfg->fun_fact);
     m_gui->sleep();
+}
+
+void MeshNode::apply_frame_led(uint8_t kind, uint8_t idx)
+{
+    struct frame_led led;
+
+    // anim 0 (Off) means "no per-frame override" — leave the default LED.
+    if (m_leds && app_config_get_frame_led(kind, idx, &led) &&
+        led.anim != (uint8_t)LedPattern::Off) {
+        m_leds->set_anim(led_pattern_from_code(led.anim), led.r, led.g, led.b);
+    }
 }
 
 void MeshNode::on_set_name(const char *name, size_t len)
@@ -205,6 +237,24 @@ void MeshNode::on_set_led_color(uint8_t r, uint8_t g, uint8_t b)
     }
 }
 
+void MeshNode::on_set_attendee_id(const char *id, size_t len)
+{
+    app_config_set_attendee_id(id, len);
+    redraw_identity();   // table ID lives on the identity screen
+}
+
+void MeshNode::on_set_frame_led(uint8_t kind, uint8_t idx, uint8_t anim,
+                                uint8_t r, uint8_t g, uint8_t b)
+{
+    app_config_set_frame_led(kind, idx, anim, r, g, b);
+
+    // If this is the frame currently on screen, apply it live.
+    const struct app_config *cfg = app_config_get();
+    if (cfg->has_disp && cfg->disp_kind == kind && cfg->disp_idx == idx) {
+        apply_frame_led(kind, idx);
+    }
+}
+
 void MeshNode::on_image(uint8_t slot, uint8_t fmt, const uint8_t *buf, size_t len,
                         uint16_t w, uint16_t h)
 {
@@ -223,6 +273,9 @@ void MeshNode::on_image(uint8_t slot, uint8_t fmt, const uint8_t *buf, size_t le
         m_gui->sleep();
     }
     app_config_set_has_image(true);
+    if (slot < BADGE_IMAGE_SLOTS) {
+        apply_frame_led(APP_DISP_KIND_IMAGE, slot);
+    }
 }
 
 void MeshNode::on_set_screen(uint8_t idx, const char *hdr, size_t hlen,
@@ -248,6 +301,7 @@ void MeshNode::on_display_screen(uint8_t kind, uint8_t idx)
         m_gui->sleep();
         app_config_set_display(kind, idx);
         app_config_set_has_image(false);
+        apply_frame_led(kind, idx);
     } else if (kind == APP_DISP_KIND_IMAGE) {
         uint8_t fmt;
         size_t len;
@@ -267,5 +321,6 @@ void MeshNode::on_display_screen(uint8_t kind, uint8_t idx)
         m_gui->sleep();
         app_config_set_display(kind, idx);
         app_config_set_has_image(true);
+        apply_frame_led(kind, idx);
     }
 }
