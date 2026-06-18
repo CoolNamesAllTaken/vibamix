@@ -34,6 +34,7 @@ void EPD_Display(unsigned char *Image)
 	width = (EPD_WIDTH % 8 == 0) ? (EPD_WIDTH / 8) : (EPD_WIDTH / 8 + 1);
 	height = EPD_HEIGHT;
 	length = width * height;
+	EPD_ResetRamCounter(); // deterministic origin so re-renders don't drift 1-2px
 	EPD_W21_WriteCMD(0x24);
 	for (i = 0; i < length; i++)
 	{
@@ -72,8 +73,10 @@ static void Epaper_Write_RowReversed(const unsigned char *Image)
 // EPD_Display_Partial() updates.
 void EPD_SetBaseMap(const unsigned char *Image)
 {
+	EPD_ResetRamCounter(); // deterministic origin (shared with EPD_Display) so renders align
 	Epaper_Write_Command(0x24);
 	Epaper_Write_RowReversed(Image);
+	EPD_ResetRamCounter();
 	Epaper_Write_Command(0x26);
 	Epaper_Write_RowReversed(Image);
 	EPD_Update();
