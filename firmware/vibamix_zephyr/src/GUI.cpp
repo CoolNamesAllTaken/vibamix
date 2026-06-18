@@ -33,7 +33,7 @@ void GUI::show_hello_world()
     printk("ePaper hello world displayed\n");
 }
 
-void GUI::show_text(const char *name, const char *fun_fact)
+void GUI::show_text(const char *name, const char *body)
 {
     Paint_NewImage(m_image, EPD_WIDTH, EPD_HEIGHT, ROTATE_270, WHITE);
     Paint_Clear(WHITE);
@@ -42,7 +42,7 @@ void GUI::show_text(const char *name, const char *fun_fact)
 
     // Word-wrap the fun fact across the canvas width in Poppins Medium. The font
     // is proportional, so wrap by measuring candidate lines, not a char count.
-    if (fun_fact && fun_fact[0]) {
+    if (body && body[0]) {
         const int kLineH = PoppinsMd16.Height + 2;
         const int maxW   = kCanvasW - 16;
         const int x = 8;
@@ -50,7 +50,7 @@ void GUI::show_text(const char *name, const char *fun_fact)
         char line[64];
         int n = 0;
 
-        const char *p = fun_fact;
+        const char *p = body;
         for (;;) {
             while (*p == ' ') {
                 ++p;

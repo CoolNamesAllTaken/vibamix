@@ -125,7 +125,8 @@ To flash a pre-built app hex from elsewhere, click **Browse…** and select the
 file; the bootloader still comes from `build/bl/zephyr/zephyr.hex`.
 
 Click **Flash All** to flash every present board in parallel. Each board runs a
-`bootloader:` phase then an `app:` phase. Status per slot:
+`bootloader:` phase, an `app:` phase, then a `factory id` phase. Status per slot
+(the done message includes the assigned id, e.g. `✓ done (id 0007)`):
 
 | Status | Meaning |
 |--------|---------|
@@ -135,6 +136,21 @@ Click **Flash All** to flash every present board in parallel. Each board runs a
 | `verify…` | Verifying written data |
 | `✓ done` | Flashed successfully |
 | `✗ error` | Flash failed — check the board |
+
+### Per-unit badge ids
+
+Each board is assigned a unique 15-bit id (`0001`..`7FFF`) written to the
+`factory` flash partition after the images. The firmware uses it as the mesh
+unicast address, the config code, and the `vibamix-XXXX` GAP name, so a fleet of
+hundreds of badges doesn't collide (a random device-id slice collides at ~75% for
+300 badges). Ids are handed out sequentially and persisted in
+`flashtool/usb_hubs/serials.json`, keyed by the probe's serial — re-flashing the
+same board reuses its id.
+
+> ⚠️ **Back up `serials.json`.** It is the source of truth for which ids are
+> taken. If it is lost, assignment restarts at `0001` and you can mint duplicate
+> ids on already-flashed badges. A board flashed with plain `west flash` (no
+> factory record) falls back to the legacy device-id-derived code.
 
 ### Re-calibrating
 

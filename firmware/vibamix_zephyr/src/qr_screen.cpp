@@ -2,6 +2,7 @@
 
 #include "Display_EPD_W21.h"
 #include "GUI_Paint.h"
+#include "badge_store.h"
 #include "fonts.h"
 #include "gateway_status.h"
 #include "qrcodegen.h"
@@ -105,6 +106,71 @@ static void draw_status_bar(int batt_mv, int batt_pct, int remaining_sec, int to
     fill_rect(kMargin, 33, kCanvasW - kMargin, 33);
 }
 
+// Draw `text` word-wrapped to `maxW` pixels starting at (x, y), in proportional
+// font `font`. The font is proportional, so wrap by measuring candidate lines
+// (mirrors the loop in GUI::show_text). Returns the y just below the last line.
+static int draw_wrapped(int x, int y, int maxW, const char *text, pFONT *font)
+{
+    if (!text || !text[0]) {
+        return y;
+    }
+    const int line_h = font->Height + 2;
+    char line[64];
+    int n = 0;
+
+    const char *p = text;
+    for (;;) {
+        while (*p == ' ') {
+            ++p;
+        }
+        if (*p == '\0') {
+            break;
+        }
+
+        // Next word is [p, q).
+        const char *q = p;
+        while (*q != '\0' && *q != ' ') {
+            ++q;
+        }
+        const int wlen = (int)(q - p);
+
+        // Build "<line> <word>" and see if it still fits within maxW.
+        char cand[64];
+        int cn = 0;
+        if (n > 0) {
+            memcpy(cand, line, n);
+            cn = n;
+            cand[cn++] = ' ';
+        }
+        int copy = wlen;
+        if (cn + copy > (int)sizeof(cand) - 1) {
+            copy = (int)sizeof(cand) - 1 - cn;
+        }
+        memcpy(cand + cn, p, copy);
+        cn += copy;
+        cand[cn] = '\0';
+
+        if (n > 0 && Paint_StringWidth_P(cand, font) > maxW) {
+            // Doesn't fit: flush the current line, start a new one with the word.
+            Paint_DrawString_P(x, y, line, font, WHITE, BLACK);
+            y += line_h;
+            n = (copy < (int)sizeof(line) - 1) ? copy : (int)sizeof(line) - 1;
+            memcpy(line, p, n);
+            line[n] = '\0';
+        } else {
+            // Fits (or the word is alone on the line): accept the candidate.
+            memcpy(line, cand, cn + 1);
+            n = cn;
+        }
+        p = q;
+    }
+    if (n > 0) {
+        Paint_DrawString_P(x, y, line, font, WHITE, BLACK);
+        y += line_h;
+    }
+    return y;
+}
+
 void qr_screen_draw(GUI &gui, const char *code, const char *url,
                     int batt_mv, int batt_pct, int remaining_sec, int total_sec)
 {
@@ -148,116 +214,144 @@ void qr_screen_draw(GUI &gui, const char *code, const char *url,
         Paint_DrawString_P(kMargin, body_y, "QR ERROR", &PoppinsMd20, WHITE, BLACK);
     }
 
-    // Right column (fixed x so it doesn't shift with QR size).
+    // Right column (fixed x so it doesn't shift with QR size): a wrapped prompt
+    // and the badge id.
     const int rx = kQrBox + 8;
-    Paint_DrawString_P(rx, body_y,      "Set up",     &PoppinsMd20, WHITE, BLACK);
-    Paint_DrawString_P(rx, body_y + 22, "your badge", &PoppinsMd20, WHITE, BLACK);
-    Paint_DrawString_P(rx, body_y + 52, "Scan to set up", &PoppinsMd16, WHITE, BLACK);
-    Paint_DrawString_P(rx, body_y + 80, "CODE", &PoppinsMd16, WHITE, BLACK);
-    Paint_DrawString_P(rx, body_y + 96, code, &PoppinsSB24, WHITE, BLACK);
+    const int rmaxW = kCanvasW - kMargin - rx;
+    int ry = draw_wrapped(rx, body_y, rmaxW,
+                          "Scan with the vibamix app to set up your badge",
+                          &PoppinsMd16);
+    char idline[24];
+    snprintf(idline, sizeof(idline), "Badge ID: %s", code ? code : "");
+    Paint_DrawString_P(rx, ry + 8, idline, &PoppinsMd16, WHITE, BLACK);
 }
 
-// Word-wrap `s` in proportional `font` within `max_w`, starting at (x, y).
-// Returns the y just past the last line.
-static int draw_wrapped(int x, int y, int max_w, const char *s, pFONT *font, int line_h)
+// Blit a 2-bit grayscale source (4 px/byte, MSB-first, row-major, level 0=black..
+// 3=white — the dither.c / image_xfer authoring format) into the rect [rx,ry,rw,rh],
+// scaled to fit while preserving aspect and centered. Nearest-neighbor sample,
+// thresholded to 1bpp (levels 0/1 -> black).
+static void draw_gray2_fit(const uint8_t *src, int sw, int sh,
+                           int rx, int ry, int rw, int rh)
 {
-    if (!s || !s[0]) {
-        return y;
+    if (!src || sw <= 0 || sh <= 0 || rw <= 0 || rh <= 0) {
+        return;
     }
-    char line[64];
-    size_t ll = 0;
-    line[0] = '\0';
-    const char *p = s;
-
-    while (*p) {
-        while (*p == ' ') {
-            p++;
-        }
-        const char *w0 = p;
-        while (*p && *p != ' ') {
-            p++;
-        }
-        size_t wn = (size_t)(p - w0);
-        if (wn == 0) {
-            break;
-        }
-        if (wn > sizeof(line) - 1) {
-            wn = sizeof(line) - 1;   // clamp a pathological word
-        }
-
-        // Build "line + ' ' + word" in a candidate, bounded by memcpy.
-        char cand[64];
-        size_t cl = 0;
-        if (ll) {
-            memcpy(cand, line, ll);
-            cl = ll;
-            if (cl < sizeof(cand) - 1) {
-                cand[cl++] = ' ';
+    int dw = rw;
+    int dh = sh * rw / sw;
+    if (dh > rh) {
+        dh = rh;
+        dw = sw * rh / sh;
+    }
+    if (dw <= 0 || dh <= 0) {
+        return;
+    }
+    const int ox = rx + (rw - dw) / 2;
+    const int oy = ry + (rh - dh) / 2;
+    for (int dy = 0; dy < dh; dy++) {
+        const int sy = dy * sh / dh;
+        for (int dx = 0; dx < dw; dx++) {
+            const int sx = dx * sw / dw;
+            const uint32_t pi = (uint32_t)sy * sw + sx;
+            const uint8_t shift = (uint8_t)((3 - (pi & 3)) * 2);
+            const uint8_t val = (src[pi >> 2] >> shift) & 0x3;
+            if (val < 2) {
+                Paint_SetPixel(ox + dx, oy + dy, BLACK);
             }
         }
-        if (cl + wn > sizeof(cand) - 1) {
-            wn = sizeof(cand) - 1 - cl;
-        }
-        memcpy(cand + cl, w0, wn);
-        cl += wn;
-        cand[cl] = '\0';
-
-        if (ll == 0 || Paint_StringWidth_P(cand, font) <= max_w) {
-            memcpy(line, cand, cl + 1);
-            ll = cl;
-        } else {
-            Paint_DrawString_P(x, y, line, font, WHITE, BLACK);
-            y += line_h;
-            size_t n = (size_t)(p - w0);
-            if (n > sizeof(line) - 1) {
-                n = sizeof(line) - 1;
-            }
-            memcpy(line, w0, n);
-            line[n] = '\0';
-            ll = n;
-        }
     }
-    if (ll) {
-        Paint_DrawString_P(x, y, line, font, WHITE, BLACK);
-        y += line_h;
-    }
-    return y;
 }
 
-// Identity body: name (large), "Table <id>", then the wrapped fun fact.
+// Height of the bottom name/ID banner on the identity frame, and the thin
+// countdown fill pinned to the very bottom edge (drawn within the banner).
+static constexpr int kIdBannerH = 30;
+static constexpr int kIdFillH   = 4;
+
+// Bottom banner: a solid black strip across the screen bottom with `left` (the
+// attendee name, or the event name when an event mesh is connected) and the
+// attendee ID `right` in white.
+static void draw_identity_banner(const char *left, const char *right)
+{
+    const int by0 = kCanvasH - kIdBannerH;
+
+    fill_rect(0, by0, kCanvasW - 1, kCanvasH - 1);   // black strip
+    Paint_DrawString_P(kMargin, by0 + 4, (left && left[0]) ? left : "vibamix",
+                       &PoppinsMd20, BLACK, WHITE);   // BG black, FG white
+    if (right && right[0]) {
+        const int tw = Paint_StringWidth_P(right, &PoppinsMd16);
+        Paint_DrawString_P(kCanvasW - kMargin - tw, by0 + 7, right,
+                           &PoppinsMd16, BLACK, WHITE);
+    }
+}
+
+// Thin countdown fill pinned to the very bottom edge of the banner: a white bar
+// (legible over the black banner) whose width shrinks from full toward empty as
+// remaining/total falls. Mirrors event_status_overlay's fill math.
+static void draw_identity_countdown(int remaining_sec, int total_sec)
+{
+    if (total_sec <= 0) {
+        total_sec = 1;
+    }
+    if (remaining_sec < 0) {
+        remaining_sec = 0;
+    } else if (remaining_sec > total_sec) {
+        remaining_sec = total_sec;
+    }
+    const int fy0 = kCanvasH - kIdFillH;
+    const int fill_w = (int)((int64_t)remaining_sec * kCanvasW / total_sec);
+    for (int y = fy0; y < kCanvasH; y++) {
+        for (int x = 0; x < kCanvasW; x++) {
+            Paint_SetPixel(x, y, x < fill_w ? WHITE : BLACK);
+        }
+    }
+}
+
+// Identity body: the optional identity image fills the area above the bottom
+// name/ID banner; without one the main area is left blank (white). The banner is
+// always drawn at the bottom.
 static void draw_identity_body(const char *name, const char *table,
-                               const char *fun_fact, int top_y)
+                               const uint8_t *img, uint8_t img_fmt,
+                               uint16_t img_w, uint16_t img_h, int top_y)
 {
-    int y = top_y;
-    Paint_DrawString_P(kMargin, y, (name && name[0]) ? name : "vibamix",
-                       &PoppinsSB24, WHITE, BLACK);
-    y += PoppinsSB24.Height + 6;
-
-    if (table && table[0]) {
-        char tb[24];
-        snprintf(tb, sizeof(tb), "Table %s", table);
-        Paint_DrawString_P(kMargin, y, tb, &PoppinsMd20, WHITE, BLACK);
-        y += PoppinsMd20.Height + 6;
+    if (img && img_fmt == BADGE_FMT_GRAY2 && img_w > 0 && img_h > 0) {
+        const int by0 = kCanvasH - kIdBannerH;
+        draw_gray2_fit(img, img_w, img_h, kMargin, top_y,
+                       kCanvasW - 2 * kMargin, by0 - top_y - 2);
     }
-    if (fun_fact && fun_fact[0]) {
-        y += 4;
-        draw_wrapped(kMargin, y, kCanvasW - 2 * kMargin, fun_fact, &PoppinsMd16,
-                     PoppinsMd16.Height + 3);
-    }
+    draw_identity_banner(name, table);
 }
 
 void identity_screen_draw(GUI &gui, const char *name, const char *table,
-                          const char *fun_fact)
+                          const uint8_t *img, uint8_t img_fmt,
+                          uint16_t img_w, uint16_t img_h)
 {
     uint8_t *fb = gui.framebuffer();
 
     Paint_NewImage(fb, EPD_WIDTH, EPD_HEIGHT, ROTATE_270, WHITE);
     Paint_Clear(WHITE);
-    draw_identity_body(name, table, fun_fact, 12);
+    draw_identity_body(name, table, img, img_fmt, img_w, img_h, kMargin);
+    // Keep the "Connected" strip when this frame is force-displayed over GATT
+    // (no-op when not connected).
+    gateway_status_overlay(fb);
+}
+
+void identity_countdown_overlay(GUI &gui, const char *name, const char *table,
+                                const char *event_name, int remaining_sec,
+                                int total_sec)
+{
+    uint8_t *fb = gui.framebuffer();
+
+    // Re-bind Paint to the already-built identity frame without clearing it, then
+    // repaint only the bottom banner + countdown fill. When an event mesh is
+    // connected the banner's left text is the event name; otherwise the attendee
+    // name. Idempotent, so repeated partial refreshes don't smear.
+    Paint_NewImage(fb, EPD_WIDTH, EPD_HEIGHT, ROTATE_270, WHITE);
+    const char *left = (event_name && event_name[0]) ? event_name : name;
+    draw_identity_banner(left, table);
+    draw_identity_countdown(remaining_sec, total_sec);
 }
 
 void identity_status_screen_draw(GUI &gui, const char *name, const char *table,
-                                 const char *fun_fact, int batt_mv, int batt_pct,
+                                 int batt_mv, int batt_pct,
                                  int remaining_sec, int total_sec)
 {
     uint8_t *fb = gui.framebuffer();
@@ -265,7 +359,7 @@ void identity_status_screen_draw(GUI &gui, const char *name, const char *table,
     Paint_NewImage(fb, EPD_WIDTH, EPD_HEIGHT, ROTATE_270, WHITE);
     Paint_Clear(WHITE);
     draw_status_bar(batt_mv, batt_pct, remaining_sec, total_sec);
-    draw_identity_body(name, table, fun_fact, 42);
+    draw_identity_body(name, table, nullptr, 0, 0, 0, 42);
 }
 
 void config_screen_connected(GUI &gui, const char *name, const char *table,
@@ -318,8 +412,6 @@ void config_screen_connected(GUI &gui, const char *name, const char *table,
         Paint_DrawString_P(kMargin, 110, name, &PoppinsMd20, WHITE, BLACK);
     }
     if (table && table[0]) {
-        char tb[24];
-        snprintf(tb, sizeof(tb), "Table %s", table);
-        Paint_DrawString_P(kMargin, 138, tb, &PoppinsMd16, WHITE, BLACK);
+        Paint_DrawString_P(kMargin, 138, table, &PoppinsMd16, WHITE, BLACK);
     }
 }

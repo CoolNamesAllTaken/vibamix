@@ -19,7 +19,9 @@ extern "C" {
  * Image payloads are panel-sized (176x264): 1-bit = 5808 B, 2-bit = 11616 B.
  */
 
-#define BADGE_IMAGE_SLOTS 4
+#define BADGE_IMAGE_SLOTS 4    /* user image frames, slots 0..3 */
+#define BADGE_SLOT_IDENTITY 4  /* dedicated identity-frame image slot */
+#define BADGE_STORE_SLOTS  5   /* total physical slots (image frames + identity) */
 #define BADGE_SLOT_NONE   0xFF /* render-only, do not persist to a slot */
 
 #define BADGE_FMT_BW    1 /* 1-bit B/W, panel-native (5808 B) — display by direct blit */
@@ -43,6 +45,11 @@ int badge_store_image_read(uint8_t slot, uint8_t *buf, size_t cap, uint8_t *fmt,
 
 /* True if the slot holds a valid image (header magic matches). */
 bool badge_store_image_present(uint8_t slot);
+
+/* Read just the stored image's header (format/size/dims) without copying pixels.
+ * Outputs are optional. Returns 0 on success, -ENOENT if the slot is empty. */
+int badge_store_image_info(uint8_t slot, uint8_t *fmt, size_t *out_len,
+			   uint16_t *w, uint16_t *h);
 
 #ifdef __cplusplus
 }

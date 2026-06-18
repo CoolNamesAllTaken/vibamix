@@ -36,7 +36,7 @@ int badge_store_init(void)
 
 static bool read_hdr(uint8_t slot, struct img_hdr *hdr)
 {
-	if (!s_fa || slot >= BADGE_IMAGE_SLOTS) {
+	if (!s_fa || slot >= BADGE_STORE_SLOTS) {
 		return false;
 	}
 	if (flash_area_read(s_fa, (off_t)slot * SLOT_SIZE, hdr, sizeof(*hdr)) != 0) {
@@ -48,7 +48,7 @@ static bool read_hdr(uint8_t slot, struct img_hdr *hdr)
 int badge_store_image_write(uint8_t slot, uint8_t fmt, const uint8_t *data, size_t len,
 			    uint16_t w, uint16_t h, uint32_t crc)
 {
-	if (!s_fa || slot >= BADGE_IMAGE_SLOTS) {
+	if (!s_fa || slot >= BADGE_STORE_SLOTS) {
 		return -EINVAL;
 	}
 	if (len == 0 || (len % 16) != 0 || HDR_SIZE + len > SLOT_SIZE) {
@@ -120,4 +120,27 @@ bool badge_store_image_present(uint8_t slot)
 	struct img_hdr hdr;
 
 	return read_hdr(slot, &hdr);
+}
+
+int badge_store_image_info(uint8_t slot, uint8_t *fmt, size_t *out_len,
+			   uint16_t *w, uint16_t *h)
+{
+	struct img_hdr hdr;
+
+	if (!read_hdr(slot, &hdr)) {
+		return -ENOENT;
+	}
+	if (fmt) {
+		*fmt = hdr.fmt;
+	}
+	if (out_len) {
+		*out_len = hdr.len;
+	}
+	if (w) {
+		*w = hdr.w;
+	}
+	if (h) {
+		*h = hdr.h;
+	}
+	return 0;
 }

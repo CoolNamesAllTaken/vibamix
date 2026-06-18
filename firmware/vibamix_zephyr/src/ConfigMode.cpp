@@ -22,9 +22,11 @@
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/util.h>
 
-// Base URL the QR encodes; the page reads `id`. Set this to your GitHub Pages URL.
-// Keep it short so the QR stays a low version (see qr_screen.cpp).
-#define VIBAMIX_CONFIG_URL_BASE "https://example.github.io/vibamix/?id="
+// Prefix of the deep link the QR encodes; the badge code is appended to form
+// "vibamix://connect?name=vibamix-XXXX", which the native vibamix app opens and
+// uses to connect to this badge by its GAP name. Keep it short so the QR stays a
+// low version (see qr_screen.cpp).
+#define VIBAMIX_CONFIG_QR_PREFIX "vibamix://connect?name=vibamix-"
 
 // How long to stay awake with no activity before powering off.
 static constexpr int64_t kConfigWindowMs = 180 * 1000;
@@ -74,19 +76,24 @@ static atomic_t           s_display_pending;
 static uint8_t            s_pd_kind, s_pd_idx;
 
 // Dedicated fast connectable advertiser, run only during config mode so a laptop
-// finds the badge instantly. The mesh proxy's own advertising is slow (~1.9 s
-// Network-ID) with the name only in the scan response; this advert puts the
-// config service UUID + name in the primary AD at ~100 ms. Extended advertising
-// (a second adv set; CONFIG_BT_EXT_ADV_MAX_ADV_SET=2) — required to fit a 128-bit
-// UUID + name, and to coexist with the mesh stack's own extended advertising.
+// or phone finds the badge instantly. The mesh proxy's own advertising is slow
+// (~1.9 s Network-ID) and carries the name only in its scan response; this advert
+// puts the config service UUID in the primary AD + the name in the scan response.
+//
+// LEGACY advertising (not extended): macOS/CoreBluetooth (and iOS/Web Bluetooth)
+// connect unreliably to connectable *extended* advertisers — the connection
+// handshake times out and can wedge the host controller. A legacy connectable +
+// scannable advertiser connects reliably. The 128-bit UUID (18 B) + flags (3 B)
+// fit the 31-byte legacy AD; the name rides in the scan response. Coexists with
+// the mesh stack's adv sets (CONFIG_BT_EXT_ADV_MAX_ADV_SET=5 leaves room).
 static struct bt_le_ext_adv *s_adv;
 static volatile bool         s_adv_on;
 static bool                  s_adv_give_up;
 
 static const struct bt_le_adv_param k_fast_adv_param = {
     .id = BT_ID_DEFAULT,
-    .sid = 1,
-    .options = BT_LE_ADV_OPT_CONN | BT_LE_ADV_OPT_EXT_ADV,
+    .sid = 1,  // ignored for legacy advertising
+    .options = BT_LE_ADV_OPT_CONN | BT_LE_ADV_OPT_SCANNABLE,
     .interval_min = 0x00A0,  // 100 ms
     .interval_max = 0x00F0,  // 150 ms
 };
@@ -103,9 +110,11 @@ static void start_fast_adv(void)
                 BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR),
                 BT_DATA_BYTES(BT_DATA_UUID128_ALL,
                     BT_UUID_128_ENCODE(0xf0de0001, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)),
+            };
+            struct bt_data sd[] = {
                 BT_DATA(BT_DATA_NAME_COMPLETE, name, strlen(name)),
             };
-            if (bt_le_ext_adv_set_data(s_adv, ad, ARRAY_SIZE(ad), NULL, 0) != 0) {
+            if (bt_le_ext_adv_set_data(s_adv, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd)) != 0) {
                 printk("config: fast adv set_data failed\n");
             }
         }
@@ -366,7 +375,7 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
     char code[5];
     app_identity_code(code);
     char url[80];
-    snprintf(url, sizeof(url), VIBAMIX_CONFIG_URL_BASE "%s", code);
+    snprintf(url, sizeof(url), VIBAMIX_CONFIG_QR_PREFIX "%s", code);
 
     const int total_sec = (int)(kConfigWindowMs / 1000);
 
@@ -404,6 +413,14 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
     uint8_t ka_seq = 0;
     bool    ka_blink = false;
     int     ka_tick = 0;
+
+    // Per-frame LEDs: light the strip only while a content frame is on the panel
+    // (mirror s_content_shown). The strip was powered down before config mode, so
+    // we re-power on the rising edge and cut it again on the falling edge. The
+    // frame's pattern/color is already set by apply_frame_led in the deferred
+    // on_display_screen / on_image paths.
+    LEDStrip *leds = mesh->leds();
+    bool      led_on = false;
 
     for (;;) {
         // Consume a mesh heartbeat/content event (set on the BT thread) here so
@@ -469,10 +486,11 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
             break;
         }
 
-        // While connected: 1 Hz bidirectional keepalive. Notify the laptop
-        // (badge->app liveness) and repaint a pulsing dot whose fill reflects
-        // whether the laptop's keepalive writes are still arriving (app->badge).
-        if (connected && phase == PHASE_CONNECTED && !s_content_shown) {
+        // While connected: 1 Hz bidirectional keepalive. The notify must keep
+        // running even while a forced frame is shown (s_content_shown), so the link
+        // stays up; only the Connected-screen repaint is gated (so it doesn't
+        // overpaint the shown frame).
+        if (connected && phase == PHASE_CONNECTED) {
             int64_t now = k_uptime_get();
             if (now - last_ka_sent >= 1000) {
                 last_ka_sent = now;
@@ -480,13 +498,15 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
                 ka_blink = !ka_blink;
                 bool app_alive = (now - s_last_keepalive_rx) < 3000;
                 gateway_status_set_keepalive(app_alive, ka_blink);  // feed the banner dot
-                config_screen_connected(*gui, cfg->name,
-                                        cfg->has_attendee ? cfg->attendee_id : "",
-                                        batt_mv, batt_pct, app_alive, ka_blink);
-                if (++ka_tick % kFullRefreshEvery == 0) {
-                    gui->set_base_map();
-                } else {
-                    gui->refresh_partial();
+                if (!s_content_shown) {
+                    config_screen_connected(*gui, cfg->name,
+                                            cfg->has_attendee ? cfg->attendee_id : "",
+                                            batt_mv, batt_pct, app_alive, ka_blink);
+                    if (++ka_tick % kFullRefreshEvery == 0) {
+                        gui->set_base_map();
+                    } else {
+                        gui->refresh_partial();
+                    }
                 }
             }
         }
@@ -505,7 +525,7 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
                 } else {
                     identity_status_screen_draw(*gui, cfg->name,
                                                 cfg->has_attendee ? cfg->attendee_id : "",
-                                                cfg->fun_fact, batt_mv, batt_pct,
+                                                batt_mv, batt_pct,
                                                 remaining, total_sec);
                 }
                 if (++tick % kFullRefreshEvery == 0) {
@@ -515,19 +535,50 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
                 }
             }
         }
-        k_sleep(K_MSEC(250));
+        // Drive the per-frame LED strip to match whether a content frame is shown.
+        if (leds) {
+            if (s_content_shown && !led_on) {
+                leds->power_on();
+                led_on = true;
+            } else if (!s_content_shown && led_on) {
+                leds->off();
+                led_on = false;
+            }
+            if (led_on) {
+                leds->render();
+            }
+        }
+
+        // Tick fast enough for smooth animation only while the strip is lit.
+        k_sleep(K_MSEC(led_on ? LEDStrip::kFrameMs : 250));
     }
     printk("config: window closing (%s)\n", s_exit ? "button" : "timeout");
 
+    if (leds) {
+        leds->off();   // strip dark for the identity rest + System OFF
+    }
     gateway_status_set_active(false);
     stop_fast_adv();
 
-    // Rest on a clean identity screen (no status bar) unless a specific frame or
-    // OTA screen is being shown — the bistable panel keeps whatever we leave.
-    if (!s_content_shown) {
+    // Leaving GATT mode: always rest on the clean identity frame (the badge's home
+    // screen), even if a frame/image was shown during the session. The render
+    // buffers are idle now (no transfer in flight), so reuse buf 0 to read the
+    // optional identity image.
+    //
+    // (A successful OTA reboots ~1.2 s after its END write, which preempts this and
+    // keeps the "Rebooting…" screen; a failed OTA falls through to identity here.)
+    {
+        const uint8_t *img = nullptr;
+        uint8_t  ifmt = 0;
+        size_t   ilen = 0;
+        uint16_t iw = 0, ih = 0;
+        if (badge_store_image_read(BADGE_SLOT_IDENTITY, s_render_buf[0],
+                                   sizeof(s_render_buf[0]), &ifmt, &ilen, &iw, &ih) == 0) {
+            img = s_render_buf[0];
+        }
         gui->wake();
         identity_screen_draw(*gui, cfg->name, cfg->has_attendee ? cfg->attendee_id : "",
-                             cfg->fun_fact);
+                             img, ifmt, iw, ih);
         gui->set_base_map();
     }
     gui->sleep();

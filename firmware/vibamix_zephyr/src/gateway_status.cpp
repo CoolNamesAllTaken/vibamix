@@ -57,7 +57,7 @@ static void fill(int x0, int y0, int x1, int y1, uint16_t color)
 
 void gateway_status_overlay(uint8_t *fb)
 {
-	if (!s_active || s_count == 0) {
+	if (!s_active) {
 		return;
 	}
 	// Re-bind Paint to the (already-built) framebuffer without clearing it, then
@@ -76,7 +76,14 @@ void gateway_status_overlay(uint8_t *fb)
 		fill(13, 5, 13, 13, WHITE);
 	}
 
+	// "Broadcast: …" only while acting as a mesh gateway (a relayed command was
+	// noted); a plain direct GATT connection just shows "Connected".
 	char buf[40];
-	snprintf(buf, sizeof(buf), "Broadcast: %s  x%u", label_for(s_cmd), (unsigned)s_count);
+	if (s_count > 0) {
+		snprintf(buf, sizeof(buf), "Broadcast: %s  x%u", label_for(s_cmd),
+			 (unsigned)s_count);
+	} else {
+		snprintf(buf, sizeof(buf), "Connected");
+	}
 	Paint_DrawString_P(20, 2, buf, &PoppinsMd16, BLACK, WHITE); // white text on black
 }

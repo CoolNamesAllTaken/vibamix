@@ -36,6 +36,17 @@
 		vbat_enable: vbat_enable {
 			gpios = <&gpio1 15 GPIO_ACTIVE_HIGH>;  /* P1.15 VBAT_EN */
 		};
+		/* Antenna RF switch (U10, FM8625H). VDD must be powered for the switch
+		 * to pass signal; VCTL selects the port:
+		 *   RF_SW_CTL LOW  -> RF1 -> ANT1 (onboard chip antenna)
+		 *   RF_SW_CTL HIGH -> RF2 -> ANT2 (external antenna)
+		 * Driven active at boot in main() to select the external antenna. */
+		rf_sw_pwr: rf_sw_pwr {
+			gpios = <&gpio2 3 GPIO_ACTIVE_HIGH>;   /* P2.03 RF_SW_PWR */
+		};
+		rf_sw_ctl: rf_sw_ctl {
+			gpios = <&gpio2 5 GPIO_ACTIVE_HIGH>;   /* P2.05 RF_SW_CTL */
+		};
 	};
 
 	/* Battery voltage monitor: VBAT -> load switch -> 10K/10K divider -> P1.14 (AIN7).
@@ -249,17 +260,28 @@
 			reg = <0x8e000 DT_SIZE_K(512)>;
 		};
 
-		/* Four 16K image slots (raw flash via flash_area; see src/badge_store.c).
+		/* Five 16K image slots (raw flash via flash_area; see src/badge_store.c):
+		 * four user image frames (slots 0..3) plus the identity image (slot 4).
 		 * Each slot holds a 2-bit grayscale (11616 B) or 1-bit B/W (5808 B) image
 		 * plus a 16-byte header. */
 		images_partition: partition@10e000 {
 			label = "images";
-			reg = <0x10e000 DT_SIZE_K(64)>;
+			reg = <0x10e000 DT_SIZE_K(80)>;
 		};
 
-		storage_partition: partition@11e000 {
+		storage_partition: partition@122000 {
 			label = "storage";
-			reg = <0x11e000 DT_SIZE_K(284)>;
+			reg = <0x122000 DT_SIZE_K(264)>;
+		};
+
+		/* Per-unit factory record (assigned + written once at manufacturing by
+		 * firmware/flashtool/; read-only at runtime via src/factory_id.c). Holds
+		 * the badge's unique 15-bit id so the mesh unicast address / config code /
+		 * GAP name don't collide across a large fleet. Kept at the flash tail so
+		 * `storage` keeps its offset. */
+		factory_partition: partition@164000 {
+			label = "factory";
+			reg = <0x164000 DT_SIZE_K(4)>;
 		};
 	};
 };

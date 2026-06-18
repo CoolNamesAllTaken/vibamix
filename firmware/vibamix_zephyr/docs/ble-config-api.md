@@ -59,9 +59,31 @@ const nameChar  = await service.getCharacteristic(NAME);
 Notes:
 - The badge must be **in config mode** (button pressed) to be connectable. If `requestDevice`
   shows nothing, tell the user to press the badge button again.
-- The device may also appear by its mesh service; always select by the `vibamix-` **name**.
+- **Filter by the `vibamix-` name, not by the Config Service UUID** (see the box below).
 - There is no pairing/bonding requirement — writes are unauthenticated. The browser may still show
   its own device-chooser prompt (that is normal and required).
+
+> ### ⚠️ Why you won't see the Config Service UUID (`f0de0001`) in a scan
+>
+> In config mode the firmware **does** put the Config Service UUID `f0de0001-…` (plus the
+> `vibamix-<CODE>` name) into its advertising data — but it does so on a dedicated
+> **BLE extended-advertising set** (a 128-bit UUID + a name don't fit in the 31-byte legacy
+> packet). The extended-advert payload rides on the secondary channel (`AUX_ADV_IND`), and **many
+> hosts don't surface service UUIDs from extended advertisements** — notably **macOS CoreBluetooth**
+> (so Web Bluetooth in Chrome on macOS, and `bleak`/badgectl on macOS, won't list `f0de0001`).
+>
+> What you *will* reliably see instead is the badge's **Mesh GATT Proxy** service,
+> `00001828-0000-1000-8000-00805f9b34fb`, which it advertises with a **legacy** packet (the
+> `vibamix-<CODE>` name is in its scan response). That is the advert most scanners report.
+>
+> **Consequences for your app:**
+> - **Discover/filter by the `vibamix-` name prefix**, never by the Config Service UUID — the
+>   service UUID may not appear in the advertisement on your platform.
+> - Still pass the Config Service UUID in `optionalServices` so you may **use** it after connecting.
+>   It is always present in the badge's GATT table and is found by normal GATT service discovery on
+>   the open connection — independent of whether it was advertised.
+> - On Linux/BlueZ, or with a BLE sniffer, the `f0de0001` extended advert *is* visible; the gap is a
+>   scanner/OS limitation, not a firmware one.
 
 ---
 
@@ -313,9 +335,42 @@ time out** — it stays in config until the link drops. After disconnect it show
 screen with a countdown bar** (time to sleep, reset by the mesh heartbeat); when that elapses it
 redraws a clean identity screen and sleeps.
 
+### 9.4 Reading a frame back (SELECT → READ_AT → read)
+
+The identity (`f0de0003`), text (`f0de0004`) and image‑slot (`f0de0005`) characteristics are also
+**readable** — to load what's currently stored (e.g. to re‑edit it, or preview a stored image). The
+flow is:
+
+1. **SELECT** — write `0x21` plus a frame selector to serialize that frame into the badge's read
+   buffer:
+   - identity: `0x21, u8 want_pixels`
+   - text: `0x21, u8 idx`
+   - image slot: `0x21, u8 slot, u8 want_pixels`
+2. **Read in windows** — repeat: write `READ_AT` `0x22, u16 offset` to set the read base, then **read**
+   the characteristic (returns the bytes from `offset` onward, up to one MTU). Append each chunk and
+   advance `offset` by its length; **stop when a read returns 0 bytes** (offset past the end). This
+   windowing is **mandatory**: a single GATT characteristic value is capped at **512 bytes** and
+   macOS/CoreBluetooth enforces that, but an image frame is multi‑KB.
+
+Serialized layouts (all little‑endian; `present`/`len` describe the stored frame):
+
+- **identity:** `u8 namelen, name…, u8 idlen, id…, u8 anim,r,g,b, u8 present, u8 fmt, u16 w, u16 h,
+  u16 len, [pixels if want_pixels]`.
+- **text:** `u8 present, u8 idx, u8 anim,r,g,b, u8 hlen, header…, u16 blen, body…`.
+- **image slot:** `u8 present, u8 slot, u8 anim,r,g,b,` then the image block
+  `u8 present, u8 fmt, u16 w, u16 h, u16 len, [pixels if want_pixels]`. **Note the duplicate
+  `present` byte** — the leading `present`/`slot` precede the same image block that the identity read
+  ends with.
+
+`SELECT` resets the read window to 0; you can re‑read a frame by issuing `READ_AT 0` again.
+
 ---
 
 ## 10. Firmware update (OTA)
+
+> This section is the **BLE wire framing** for streaming an update. The bootloader internals, the
+> app **image/trailer layout**, `bl_state`, and the **`.ota` file structure** are documented in
+> [bootloader-and-image-format.md](bootloader-and-image-format.md).
 
 The badge uses a **custom direct‑XIP A/B bootloader** (no MCUboot). There are two app slots, A and
 B; the app is built **twice**, linked at each slot's offset (`scripts/build_slots.sh` →
@@ -440,11 +495,23 @@ text/display delivery is **best‑effort** (unacked flooding) — use GATT when 
 result. (Vendor opcodes, company ID `0x0059`: name `0x01`, set‑screen `0x08`/`0x09`, display `0x0A`,
 attendee `0x0B`, frame‑LED `0x0C` with the same `kind,idx,anim,r,g,b` payload as the GATT char.)
 
-**Heartbeat:** the controller sends an *event heartbeat* mesh message about **once a minute**. A
-badge that is **already awake** resets its ~3‑minute window on each heartbeat, so it stays awake to
-receive commands for as long as heartbeats continue. A heartbeat **cannot wake a sleeping badge**
-(its radio is off in deep sleep) — the attendee still wakes it with the button; heartbeats only
-keep an open window open.
+**Heartbeat (opcode `0x07`):** the controller floods an *event heartbeat* across the mesh at **1 Hz**.
+Its payload is a short **UTF‑8 event name** (**≤ 8 bytes** — longer would split the mesh access
+payload into multiple segments, multiplying the 1 Hz flood; keep it short to stay a single
+unsegmented flood). An empty payload is allowed (nameless beat).
+
+Two effects on a badge that is **already awake**:
+
+- **Config mode** (button‑woken, GATT path): each beat resets the ~3‑minute config window, as before.
+- **Mesh mode** (the normal awake path, *not* GATT‑connected for config): the badge stays awake for as
+  long as beats keep arriving and shows a **thin countdown bar along the bottom** of the screen with
+  the latched event name and the seconds until power‑off. Each beat resets that timeout to **60 s**;
+  when beats stop, the bar runs out and the badge redraws a clean frame and sleeps.
+
+A heartbeat **cannot wake a sleeping badge** (its radio is off in deep sleep) — the attendee wakes it
+with the button (or it is already awake from a recent boot); heartbeats only keep an awake badge
+awake. Because the device latches the last name and the timeout tolerates ~60 missed beats, an
+occasional dropped flood is harmless.
 
 ---
 
@@ -463,6 +530,9 @@ keep an open window open.
 - **MTU varies by platform** — keep DATA chunks ≤ ~180 bytes for cross‑platform safety; never assume
   a chunk size without handling shorter MTUs.
 - **HTTPS + user gesture** are required by Web Bluetooth; iOS needs the **Bluefy** browser.
+- **Don't filter discovery on the Config Service UUID.** It's advertised via extended advertising,
+  which macOS/CoreBluetooth (and other hosts) won't surface — filter by the `vibamix-` name and use
+  the service only after connecting. See the box in §2.
 
 ---
 

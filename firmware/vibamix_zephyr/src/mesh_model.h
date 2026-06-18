@@ -11,30 +11,27 @@ extern "C" {
 #endif
 
 /*
- * Vibamix vendor model: the badge's command surface over Bluetooth Mesh.
+ * Vibamix vendor model: the badge's BROADCAST command surface over Bluetooth
+ * Mesh. Mesh commands affect every badge at once and are ephemeral — they draw
+ * or override live state and are never stored. Per-badge persistent config
+ * (name, ID, frames, per-frame LEDs, ...) is GATT-only (see config_gatt.h).
  *
  * The composition data, element/model tables and opcode handlers live here in C
  * because the BT_MESH_MODEL_* macros use C99 compound literals (not valid C++).
- * Config opcodes are forwarded to the C++ app through the handler struct below;
- * image opcodes are forwarded to image_xfer.c.
+ * Commands are forwarded to the C++ app through the handler struct below; image
+ * opcodes are forwarded to image_xfer.c (render-only, no storage slot).
  */
 
 struct mesh_config_handlers {
-	void (*set_name)(const char *name, size_t len);
-	void (*set_fun_fact)(const char *fact, size_t len);
-	void (*set_led_color)(uint8_t r, uint8_t g, uint8_t b);
-	/* Event heartbeat — keep an awake badge awake (resets the config window). */
-	void (*heartbeat)(void);
-	/* Store a text screen (header + body), reassembled from mesh chunks. */
-	void (*set_screen)(uint8_t idx, const char *hdr, size_t hlen,
-			   const char *body, size_t blen);
-	/* Display a stored screen: kind 0 = text screen, 1 = image slot. */
-	void (*display_screen)(uint8_t kind, uint8_t idx);
-	/* Set the attendee/table ID string. */
-	void (*set_attendee)(const char *id, size_t len);
-	/* Set a frame's LED animation + color: kind/idx as display_screen. */
-	void (*set_frame_led)(uint8_t kind, uint8_t idx, uint8_t anim,
-			      uint8_t r, uint8_t g, uint8_t b);
+	/* Event heartbeat — keep an awake badge awake (resets the config window).
+	 * Carries an optional short event name (<= 8 bytes; len 0 = nameless beat). */
+	void (*heartbeat)(const char *name, size_t len);
+	/* Override the live LED animation + color on every badge (not stored). */
+	void (*show_led)(uint8_t anim, uint8_t r, uint8_t g, uint8_t b);
+	/* Draw a text frame (title + body) straight to the panel (not stored),
+	 * reassembled from mesh chunks. */
+	void (*show_text)(const char *title, size_t tlen,
+			  const char *body, size_t blen);
 };
 
 /* Register the C++ side callbacks. Pass a pointer with static lifetime. */

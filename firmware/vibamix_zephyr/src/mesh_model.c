@@ -13,28 +13,25 @@
 #define VIBAMIX_CID      CONFIG_BT_COMPANY_ID
 #define VIBAMIX_MODEL_ID 0x0001
 
-/* Vendor opcodes (3-byte: 0x_C0_<b0>_<cid>). */
-#define OP_SET_NAME      BT_MESH_MODEL_OP_3(0x01, VIBAMIX_CID) /* UTF-8 string */
-#define OP_SET_FUN_FACT  BT_MESH_MODEL_OP_3(0x02, VIBAMIX_CID) /* UTF-8 string */
-#define OP_SET_LED_COLOR BT_MESH_MODEL_OP_3(0x03, VIBAMIX_CID) /* r,g,b */
+/* Vendor opcodes (3-byte: 0x_C0_<b0>_<cid>). Broadcast/ephemeral surface only.
+ * Opcodes 0x01/0x02/0x0A/0x0B/0x0C (set name/fun-fact/display-stored/attendee/
+ * frame-LED) were removed — that config is now GATT-only. */
+#define OP_SET_LED       BT_MESH_MODEL_OP_3(0x03, VIBAMIX_CID) /* anim,r,g,b (live, not stored) */
 #define OP_IMG_START     BT_MESH_MODEL_OP_3(0x04, VIBAMIX_CID) /* le16 size,w,h */
 #define OP_IMG_DATA      BT_MESH_MODEL_OP_3(0x05, VIBAMIX_CID) /* le16 off, bytes */
 #define OP_IMG_END       BT_MESH_MODEL_OP_3(0x06, VIBAMIX_CID) /* le32 crc */
 #define OP_HEARTBEAT     BT_MESH_MODEL_OP_3(0x07, VIBAMIX_CID) /* empty */
-#define OP_SCREEN_HDR    BT_MESH_MODEL_OP_3(0x08, VIBAMIX_CID) /* u8 idx, header */
-#define OP_SCREEN_BODY   BT_MESH_MODEL_OP_3(0x09, VIBAMIX_CID) /* u8 idx,seq,last, body */
-#define OP_DISPLAY       BT_MESH_MODEL_OP_3(0x0A, VIBAMIX_CID) /* u8 kind, idx */
-#define OP_SET_ATTENDEE  BT_MESH_MODEL_OP_3(0x0B, VIBAMIX_CID) /* UTF-8 string */
-#define OP_SET_FRAME_LED BT_MESH_MODEL_OP_3(0x0C, VIBAMIX_CID) /* kind,idx,anim,r,g,b */
+#define OP_SHOW_TEXT_HDR BT_MESH_MODEL_OP_3(0x08, VIBAMIX_CID) /* title (draw, not stored) */
+#define OP_SHOW_TEXT_BODY BT_MESH_MODEL_OP_3(0x09, VIBAMIX_CID) /* seq,last, body */
 
 static const struct mesh_config_handlers *s_cfg;
 
-/* Reassembly for a text screen pushed over mesh: header arrives in OP_SCREEN_HDR,
- * body in OP_SCREEN_BODY chunks (seq-ordered, terminated by last=1). Best-effort:
- * a dropped/out-of-order chunk aborts the update (GATT is the reliable path). */
+/* Reassembly for a text frame drawn over mesh: title arrives in OP_SHOW_TEXT_HDR,
+ * body in OP_SHOW_TEXT_BODY chunks (seq-ordered, terminated by last=1). The
+ * completed frame is drawn straight to the panel — never stored. Best-effort: a
+ * dropped/out-of-order chunk aborts the update (GATT is the reliable path). */
 static struct {
 	bool    active;
-	uint8_t idx;
 	uint8_t next_seq;
 	size_t  hlen;
 	size_t  blen;
@@ -47,33 +44,16 @@ void mesh_model_set_config_handlers(const struct mesh_config_handlers *h)
 	s_cfg = h;
 }
 
-static int handle_set_name(const struct bt_mesh_model *model,
-			   struct bt_mesh_msg_ctx *ctx, struct net_buf_simple *buf)
+static int handle_set_led(const struct bt_mesh_model *model,
+			  struct bt_mesh_msg_ctx *ctx, struct net_buf_simple *buf)
 {
-	if (s_cfg && s_cfg->set_name) {
-		s_cfg->set_name((const char *)buf->data, buf->len);
-	}
-	return 0;
-}
-
-static int handle_set_fun_fact(const struct bt_mesh_model *model,
-			       struct bt_mesh_msg_ctx *ctx, struct net_buf_simple *buf)
-{
-	if (s_cfg && s_cfg->set_fun_fact) {
-		s_cfg->set_fun_fact((const char *)buf->data, buf->len);
-	}
-	return 0;
-}
-
-static int handle_set_led_color(const struct bt_mesh_model *model,
-				struct bt_mesh_msg_ctx *ctx, struct net_buf_simple *buf)
-{
+	uint8_t anim = net_buf_simple_pull_u8(buf);
 	uint8_t r = net_buf_simple_pull_u8(buf);
 	uint8_t g = net_buf_simple_pull_u8(buf);
 	uint8_t b = net_buf_simple_pull_u8(buf);
 
-	if (s_cfg && s_cfg->set_led_color) {
-		s_cfg->set_led_color(r, g, b);
+	if (s_cfg && s_cfg->show_led) {
+		s_cfg->show_led(anim, r, g, b);
 	}
 	return 0;
 }
@@ -112,43 +92,43 @@ static int handle_heartbeat(const struct bt_mesh_model *model,
 			    struct bt_mesh_msg_ctx *ctx, struct net_buf_simple *buf)
 {
 	if (s_cfg && s_cfg->heartbeat) {
-		s_cfg->heartbeat();
+		/* Optional event name in the payload (capped; keeps the beat
+		 * unsegmented). The handler copies it, so a buf pointer is fine. */
+		size_t len = buf->len;
+
+		if (len > 8) {
+			len = 8;
+		}
+		s_cfg->heartbeat((const char *)buf->data, len);
 	}
 	return 0;
 }
 
-static int handle_screen_hdr(const struct bt_mesh_model *model,
-			     struct bt_mesh_msg_ctx *ctx, struct net_buf_simple *buf)
+static int handle_show_text_hdr(const struct bt_mesh_model *model,
+				struct bt_mesh_msg_ctx *ctx, struct net_buf_simple *buf)
 {
-	uint8_t idx = net_buf_simple_pull_u8(buf);
-	size_t  hlen = buf->len;
+	size_t hlen = buf->len;
 
-	if (idx >= APP_CFG_SCREEN_COUNT) {
-		s_scr.active = false;
-		return 0;
-	}
 	if (hlen > sizeof(s_scr.header) - 1) {
 		hlen = sizeof(s_scr.header) - 1;
 	}
 	memcpy(s_scr.header, buf->data, hlen);
 	s_scr.header[hlen] = '\0';
 	s_scr.hlen = hlen;
-	s_scr.idx = idx;
 	s_scr.blen = 0;
 	s_scr.next_seq = 0;
 	s_scr.active = true;
 	return 0;
 }
 
-static int handle_screen_body(const struct bt_mesh_model *model,
-			      struct bt_mesh_msg_ctx *ctx, struct net_buf_simple *buf)
+static int handle_show_text_body(const struct bt_mesh_model *model,
+				 struct bt_mesh_msg_ctx *ctx, struct net_buf_simple *buf)
 {
-	uint8_t idx = net_buf_simple_pull_u8(buf);
 	uint8_t seq = net_buf_simple_pull_u8(buf);
 	uint8_t last = net_buf_simple_pull_u8(buf);
 
 	/* Abort on any mismatch — best-effort over the unacked group address. */
-	if (!s_scr.active || idx != s_scr.idx || seq != s_scr.next_seq) {
+	if (!s_scr.active || seq != s_scr.next_seq) {
 		s_scr.active = false;
 		return 0;
 	}
@@ -163,65 +143,23 @@ static int handle_screen_body(const struct bt_mesh_model *model,
 
 	if (last) {
 		s_scr.body[s_scr.blen] = '\0';
-		if (s_cfg && s_cfg->set_screen) {
-			s_cfg->set_screen(s_scr.idx, s_scr.header, s_scr.hlen,
-					  s_scr.body, s_scr.blen);
+		if (s_cfg && s_cfg->show_text) {
+			s_cfg->show_text(s_scr.header, s_scr.hlen,
+					 s_scr.body, s_scr.blen);
 		}
 		s_scr.active = false;
 	}
 	return 0;
 }
 
-static int handle_display(const struct bt_mesh_model *model,
-			  struct bt_mesh_msg_ctx *ctx, struct net_buf_simple *buf)
-{
-	uint8_t kind = net_buf_simple_pull_u8(buf);
-	uint8_t idx = net_buf_simple_pull_u8(buf);
-
-	if (s_cfg && s_cfg->display_screen) {
-		s_cfg->display_screen(kind, idx);
-	}
-	return 0;
-}
-
-static int handle_set_attendee(const struct bt_mesh_model *model,
-			       struct bt_mesh_msg_ctx *ctx, struct net_buf_simple *buf)
-{
-	if (s_cfg && s_cfg->set_attendee) {
-		s_cfg->set_attendee((const char *)buf->data, buf->len);
-	}
-	return 0;
-}
-
-static int handle_set_frame_led(const struct bt_mesh_model *model,
-				struct bt_mesh_msg_ctx *ctx, struct net_buf_simple *buf)
-{
-	uint8_t kind = net_buf_simple_pull_u8(buf);
-	uint8_t idx  = net_buf_simple_pull_u8(buf);
-	uint8_t anim = net_buf_simple_pull_u8(buf);
-	uint8_t r    = net_buf_simple_pull_u8(buf);
-	uint8_t g    = net_buf_simple_pull_u8(buf);
-	uint8_t b    = net_buf_simple_pull_u8(buf);
-
-	if (s_cfg && s_cfg->set_frame_led) {
-		s_cfg->set_frame_led(kind, idx, anim, r, g, b);
-	}
-	return 0;
-}
-
 static const struct bt_mesh_model_op vibamix_op[] = {
-	{ OP_SET_NAME,      BT_MESH_LEN_MIN(0),   handle_set_name },
-	{ OP_SET_FUN_FACT,  BT_MESH_LEN_MIN(0),   handle_set_fun_fact },
-	{ OP_SET_LED_COLOR, BT_MESH_LEN_EXACT(3), handle_set_led_color },
-	{ OP_IMG_START,     BT_MESH_LEN_EXACT(6), handle_img_start },
-	{ OP_IMG_DATA,      BT_MESH_LEN_MIN(3),   handle_img_data },
-	{ OP_IMG_END,       BT_MESH_LEN_EXACT(4), handle_img_end },
-	{ OP_HEARTBEAT,     BT_MESH_LEN_MIN(0),   handle_heartbeat },
-	{ OP_SCREEN_HDR,    BT_MESH_LEN_MIN(1),   handle_screen_hdr },
-	{ OP_SCREEN_BODY,   BT_MESH_LEN_MIN(3),   handle_screen_body },
-	{ OP_DISPLAY,       BT_MESH_LEN_EXACT(2), handle_display },
-	{ OP_SET_ATTENDEE,  BT_MESH_LEN_MIN(0),   handle_set_attendee },
-	{ OP_SET_FRAME_LED, BT_MESH_LEN_EXACT(6), handle_set_frame_led },
+	{ OP_SET_LED,        BT_MESH_LEN_EXACT(4), handle_set_led },
+	{ OP_IMG_START,      BT_MESH_LEN_EXACT(6), handle_img_start },
+	{ OP_IMG_DATA,       BT_MESH_LEN_MIN(3),   handle_img_data },
+	{ OP_IMG_END,        BT_MESH_LEN_EXACT(4), handle_img_end },
+	{ OP_HEARTBEAT,      BT_MESH_LEN_MIN(0),   handle_heartbeat },
+	{ OP_SHOW_TEXT_HDR,  BT_MESH_LEN_MIN(0),   handle_show_text_hdr },
+	{ OP_SHOW_TEXT_BODY, BT_MESH_LEN_MIN(2),   handle_show_text_body },
 	BT_MESH_MODEL_OP_END,
 };
 

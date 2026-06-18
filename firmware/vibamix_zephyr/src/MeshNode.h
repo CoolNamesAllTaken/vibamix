@@ -23,26 +23,38 @@ public:
     // Apply whatever config was restored from settings to the display + LEDs.
     void apply_persisted_config();
 
+    // The LED strip this node drives (config mode borrows it to light per-frame
+    // LEDs while a content frame is on the panel).
+    LEDStrip *leds() const { return m_leds; }
+
+    // Redraw the clean identity frame (name/ID + optional image), full refresh.
+    // Used to rest the bistable panel on a bar-free frame before sleep.
+    void redraw_identity();
+
     // Called by file-scope C trampolines; not for external use.
+    //
+    // Mesh (broadcast, ephemeral): override the live LEDs / draw a text frame
+    // straight to the panel — neither is stored.
+    void on_show_led(uint8_t anim, uint8_t r, uint8_t g, uint8_t b);
+    void on_show_text(const char *title, size_t tlen, const char *body, size_t blen);
+
+    // GATT (individual, persistent) config — reused by the config-mode GATT path.
     void on_set_name(const char *name, size_t len);
-    void on_set_fun_fact(const char *fact, size_t len);
-    void on_set_led_color(uint8_t r, uint8_t g, uint8_t b);
     // image_xfer completion: store to `slot` (0xFF = render-only) + render.
     void on_image(uint8_t slot, uint8_t fmt, const uint8_t *buf, size_t len,
                   uint16_t w, uint16_t h);
     // Store a text screen (header + body) at `idx`.
     void on_set_screen(uint8_t idx, const char *hdr, size_t hlen,
                        const char *body, size_t blen);
-    // Render a stored screen: kind 0 = text screen, 1 = image slot.
+    // Render a stored frame: kind text(0) / image(1) / identity(2).
     void on_display_screen(uint8_t kind, uint8_t idx);
-    // Set the attendee/table ID (shown on the identity screen).
+    // Set the attendee/table ID (shown on the identity frame).
     void on_set_attendee_id(const char *id, size_t len);
     // Set a frame's LED animation + color; applies live if it's the shown frame.
     void on_set_frame_led(uint8_t kind, uint8_t idx, uint8_t anim,
                           uint8_t r, uint8_t g, uint8_t b);
 
 private:
-    void redraw_identity();
     void apply_frame_led(uint8_t kind, uint8_t idx);
 
     GUI      *m_gui{nullptr};

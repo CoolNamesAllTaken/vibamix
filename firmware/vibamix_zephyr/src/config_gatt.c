@@ -14,52 +14,46 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/printk.h>
 
-#define VBX_UUID_SVC     BT_UUID_128_ENCODE(0xf0de0001, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
-#define VBX_UUID_IMG     BT_UUID_128_ENCODE(0xf0de0002, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
-#define VBX_UUID_NAME    BT_UUID_128_ENCODE(0xf0de0003, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
-#define VBX_UUID_SCREEN  BT_UUID_128_ENCODE(0xf0de0004, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
-#define VBX_UUID_IMGSLOT BT_UUID_128_ENCODE(0xf0de0005, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
-#define VBX_UUID_DISPLAY BT_UUID_128_ENCODE(0xf0de0006, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
-#define VBX_UUID_ATTND   BT_UUID_128_ENCODE(0xf0de0007, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
-#define VBX_UUID_FRMLED  BT_UUID_128_ENCODE(0xf0de0008, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
-#define VBX_UUID_OTA     BT_UUID_128_ENCODE(0xf0de0009, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
-#define VBX_UUID_OTAST   BT_UUID_128_ENCODE(0xf0de000A, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
-#define VBX_UUID_KEEPAL  BT_UUID_128_ENCODE(0xf0de000B, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
-#define VBX_UUID_SNAP    BT_UUID_128_ENCODE(0xf0de000C, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
-#define VBX_UUID_SCRRD   BT_UUID_128_ENCODE(0xf0de000D, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
-#define VBX_UUID_IMGRD   BT_UUID_128_ENCODE(0xf0de000E, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
+/*
+ * Custom GATT "badge config" service for direct phone->badge configuration (NOT
+ * over mesh). Consolidated into one read/write characteristic per FRAME TYPE —
+ * identity (f0de0003), text frame (f0de0004), image frame (f0de0005) — plus a
+ * quick-render image, OTA, and keepalive. Each frame characteristic carries the
+ * whole frame, supports both write (configure) and read (load current), and folds
+ * in a "display now" op. Writes are tagged by a leading op byte; a host SELECTs a
+ * frame (which serializes it) then reads it back.
+ *
+ * 128-bit UUIDs base: f0de00xx-4b1c-4e2a-9a11-a1b2c3d4e5f6.
+ */
 
-static const struct bt_uuid_128 vbx_svc_uuid     = BT_UUID_INIT_128(VBX_UUID_SVC);
-static const struct bt_uuid_128 vbx_img_uuid     = BT_UUID_INIT_128(VBX_UUID_IMG);
-static const struct bt_uuid_128 vbx_name_uuid    = BT_UUID_INIT_128(VBX_UUID_NAME);
-static const struct bt_uuid_128 vbx_screen_uuid  = BT_UUID_INIT_128(VBX_UUID_SCREEN);
-static const struct bt_uuid_128 vbx_imgslot_uuid = BT_UUID_INIT_128(VBX_UUID_IMGSLOT);
-static const struct bt_uuid_128 vbx_display_uuid = BT_UUID_INIT_128(VBX_UUID_DISPLAY);
-static const struct bt_uuid_128 vbx_attnd_uuid   = BT_UUID_INIT_128(VBX_UUID_ATTND);
-static const struct bt_uuid_128 vbx_frmled_uuid  = BT_UUID_INIT_128(VBX_UUID_FRMLED);
-static const struct bt_uuid_128 vbx_ota_uuid     = BT_UUID_INIT_128(VBX_UUID_OTA);
-static const struct bt_uuid_128 vbx_otast_uuid   = BT_UUID_INIT_128(VBX_UUID_OTAST);
-static const struct bt_uuid_128 vbx_keepal_uuid  = BT_UUID_INIT_128(VBX_UUID_KEEPAL);
-static const struct bt_uuid_128 vbx_snap_uuid    = BT_UUID_INIT_128(VBX_UUID_SNAP);
-static const struct bt_uuid_128 vbx_scrrd_uuid   = BT_UUID_INIT_128(VBX_UUID_SCRRD);
-static const struct bt_uuid_128 vbx_imgrd_uuid   = BT_UUID_INIT_128(VBX_UUID_IMGRD);
+#define VBX_UUID_SVC    BT_UUID_128_ENCODE(0xf0de0001, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
+#define VBX_UUID_IMG    BT_UUID_128_ENCODE(0xf0de0002, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
+#define VBX_UUID_IDENT  BT_UUID_128_ENCODE(0xf0de0003, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
+#define VBX_UUID_TEXT   BT_UUID_128_ENCODE(0xf0de0004, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
+#define VBX_UUID_IMGF   BT_UUID_128_ENCODE(0xf0de0005, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
+#define VBX_UUID_OTA    BT_UUID_128_ENCODE(0xf0de0009, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
+#define VBX_UUID_OTAST  BT_UUID_128_ENCODE(0xf0de000A, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
+#define VBX_UUID_KEEPAL BT_UUID_128_ENCODE(0xf0de000B, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
 
-/* Chunk framing op bytes, shared by the image/image-slot/screen characteristics. */
-#define OP_START 0x01
-#define OP_DATA  0x02
-#define OP_END   0x03
+static const struct bt_uuid_128 vbx_svc_uuid    = BT_UUID_INIT_128(VBX_UUID_SVC);
+static const struct bt_uuid_128 vbx_img_uuid    = BT_UUID_INIT_128(VBX_UUID_IMG);
+static const struct bt_uuid_128 vbx_ident_uuid  = BT_UUID_INIT_128(VBX_UUID_IDENT);
+static const struct bt_uuid_128 vbx_text_uuid   = BT_UUID_INIT_128(VBX_UUID_TEXT);
+static const struct bt_uuid_128 vbx_imgf_uuid   = BT_UUID_INIT_128(VBX_UUID_IMGF);
+static const struct bt_uuid_128 vbx_ota_uuid    = BT_UUID_INIT_128(VBX_UUID_OTA);
+static const struct bt_uuid_128 vbx_otast_uuid  = BT_UUID_INIT_128(VBX_UUID_OTAST);
+static const struct bt_uuid_128 vbx_keepal_uuid = BT_UUID_INIT_128(VBX_UUID_KEEPAL);
+
+/* Op bytes — first byte of a write. */
+#define OP_START   0x01   /* begin a chunked payload (image pixels / text body) */
+#define OP_DATA    0x02   /* a chunk */
+#define OP_END     0x03   /* commit */
+#define OP_META    0x10   /* identity: name + ID + LED in one small write */
+#define OP_DISPLAY 0x20   /* show this frame on the panel now */
+#define OP_SELECT  0x21   /* serialize this frame so the next read returns it */
+#define OP_READ_AT 0x22   /* set the read window base (le16 offset) into s_rd */
 
 static const struct config_gatt_callbacks *s_cb;
-
-/* Reassembly for a screen pushed over GATT (reliable, acked writes). */
-static struct {
-	bool    active;
-	uint8_t idx;
-	size_t  hlen;
-	size_t  blen;
-	char    header[APP_CFG_HEADER_MAX];
-	char    body[APP_CFG_BODY_MAX];
-} s_scr;
 
 void config_gatt_set_callbacks(const struct config_gatt_callbacks *cb)
 {
@@ -73,7 +67,73 @@ static void note_activity(void)
 	}
 }
 
-/* f0de0002 — legacy 1bpp image: render only, no storage slot. */
+/* Append a length-prefixed (u8 len) string; returns bytes written. */
+static size_t put_str(uint8_t *p, const char *s, size_t maxlen)
+{
+	size_t n = strnlen(s, maxlen);
+
+	p[0] = (uint8_t)n;
+	memcpy(p + 1, s, n);
+	return 1 + n;
+}
+
+/* One shared read buffer. Identity / text / image-frame reads never overlap (the
+ * host SELECTs then reads one frame at a time), and the image payloads are large,
+ * so a single buffer serves all three. Serialized on each OP_SELECT write; the
+ * read handler returns the cached bytes (Zephyr's blob-read serves values larger
+ * than the MTU across multiple offset reads, so the buffer must stay stable). */
+/* Sized for the largest serialization: identity = name + ID + LED + image header
+ * + gray2 pixels (~11.6 KB). 64 B of headroom covers all the metadata fields. */
+static uint8_t s_rd[64 + BADGE_IMG_GRAY2_BYTES];
+static size_t  s_rd_len;
+/* App-level read window base. macOS/CoreBluetooth caps a single characteristic read
+ * at 512 B, so the host pulls s_rd in <=MTU pieces: it writes OP_READ_AT [le16 off]
+ * to move this base, then reads. OP_SELECT resets it to 0. */
+static uint16_t s_rd_off;
+
+static ssize_t frame_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+			  void *buf, uint16_t len, uint16_t offset)
+{
+	size_t base = (s_rd_off < s_rd_len) ? s_rd_off : s_rd_len;
+
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, s_rd + base, s_rd_len - base);
+}
+
+/* Append "anim, r, g, b" for frame (kind, idx). */
+static uint8_t *put_frame_led(uint8_t *q, uint8_t kind, uint8_t idx)
+{
+	struct frame_led led = { 0 };
+
+	app_config_get_frame_led(kind, idx, &led);
+	*q++ = led.anim;
+	*q++ = led.r;
+	*q++ = led.g;
+	*q++ = led.b;
+	return q;
+}
+
+/* Append "present, fmt, le16 w, le16 h, le16 len [, pixels]" for a stored image. */
+static uint8_t *put_image(uint8_t *q, uint8_t slot, bool want_pixels)
+{
+	uint8_t  fmt = 0;
+	size_t   ilen = 0;
+	uint16_t w = 0, h = 0;
+	bool present = (badge_store_image_info(slot, &fmt, &ilen, &w, &h) == 0);
+
+	*q++ = present ? 1 : 0;
+	*q++ = fmt;
+	sys_put_le16(w, q); q += 2;
+	sys_put_le16(h, q); q += 2;
+	sys_put_le16((uint16_t)ilen, q); q += 2;
+	if (present && want_pixels) {
+		badge_store_image_read(slot, q, BADGE_IMG_GRAY2_BYTES, NULL, NULL, NULL, NULL);
+		q += ilen;
+	}
+	return q;
+}
+
+/* ====================== quick-render image (f0de0002) ====================== */
+/* render only, no storage slot — draw a 1bpp image straight to the panel. */
 static ssize_t img_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			 const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
 {
@@ -114,10 +174,16 @@ static ssize_t img_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 	return len;
 }
 
-/* f0de0005 — image slot: stores into one of 4 slots, 1bpp or 2-bit grayscale.
- * START = op,slot,format,le16 size,le16 w,le16 h ; DATA/END as the image char. */
-static ssize_t imgslot_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-			     const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
+/* ====================== identity frame (f0de0003) ====================== */
+/* Write ops:
+ *   META    [0x10, namelen, name, idlen, id, anim, r, g, b]
+ *   IMG     START [0x01, fmt, le16 size, le16 w, le16 h] / DATA / END (gray2 image)
+ *   DISPLAY [0x20]
+ *   SELECT  [0x21, want_pixels]  (then read)
+ * Read returns: namelen,name, idlen,id, anim,r,g,b, present,fmt,le16 w,le16 h,
+ *   le16 len, [pixels if want_pixels]. */
+static ssize_t identity_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+			      const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
 {
 	const uint8_t *p = buf;
 
@@ -129,12 +195,43 @@ static ssize_t imgslot_write(struct bt_conn *conn, const struct bt_gatt_attr *at
 	}
 
 	switch (p[0]) {
-	case OP_START:
-		if (len < 9) {
+	case OP_META: {
+		size_t o = 1;
+
+		if (o + 1 > len) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
-		image_xfer_start(p[1] /*slot*/, p[2] /*format*/, sys_get_le16(p + 3),
-				 sys_get_le16(p + 5), sys_get_le16(p + 7));
+		uint8_t nl = p[o++];
+		if (o + nl + 1 > len) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		const char *name = (const char *)(p + o);
+		o += nl;
+		uint8_t il = p[o++];
+		if (o + il + 4 > len) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		const char *id = (const char *)(p + o);
+		o += il;
+		uint8_t anim = p[o], r = p[o + 1], g = p[o + 2], b = p[o + 3];
+
+		if (s_cb && s_cb->on_name) {
+			s_cb->on_name(name, nl);
+		}
+		if (s_cb && s_cb->on_attendee) {
+			s_cb->on_attendee(id, il);
+		}
+		if (s_cb && s_cb->on_frame_led) {
+			s_cb->on_frame_led(APP_DISP_KIND_IDENTITY, 0, anim, r, g, b);
+		}
+		break;
+	}
+	case OP_START:
+		if (len < 8) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		image_xfer_start(BADGE_SLOT_IDENTITY, p[1], sys_get_le16(p + 2),
+				 sys_get_le16(p + 4), sys_get_le16(p + 6));
 		break;
 	case OP_DATA:
 		if (len < 3) {
@@ -148,6 +245,27 @@ static ssize_t imgslot_write(struct bt_conn *conn, const struct bt_gatt_attr *at
 		}
 		image_xfer_end(sys_get_le32(p + 1));
 		break;
+	case OP_DISPLAY:
+		if (s_cb && s_cb->on_display) {
+			s_cb->on_display(APP_DISP_KIND_IDENTITY, 0);
+		}
+		break;
+	case OP_SELECT: {
+		bool want_pixels = (len >= 2 && p[1]);
+		const struct app_config *cfg = app_config_get();
+		uint8_t *q = s_rd;
+
+		q += put_str(q, cfg->name, APP_CFG_NAME_MAX - 1);
+		q += put_str(q, cfg->attendee_id, APP_CFG_ATTENDEE_MAX - 1);
+		q = put_frame_led(q, APP_DISP_KIND_IDENTITY, 0);
+		q = put_image(q, BADGE_SLOT_IDENTITY, want_pixels);
+		s_rd_len = q - s_rd;
+		s_rd_off = 0;
+		break;
+	}
+	case OP_READ_AT:
+		s_rd_off = (len >= 3) ? sys_get_le16(p + 1) : 0;
+		break;
 	default:
 		return BT_GATT_ERR(BT_ATT_ERR_NOT_SUPPORTED);
 	}
@@ -156,10 +274,27 @@ static ssize_t imgslot_write(struct bt_conn *conn, const struct bt_gatt_attr *at
 	return len;
 }
 
-/* f0de0004 — text screen: START = op,idx,hlen,header ; DATA = op,le16 off,body ;
- * END commits via on_screen. */
-static ssize_t screen_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-			    const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
+/* ====================== text frame (f0de0004) ====================== */
+/* Reassembly for a text frame pushed over GATT (reliable, acked writes). */
+static struct {
+	bool    active;
+	uint8_t idx;
+	uint8_t anim, r, g, b;
+	size_t  hlen;
+	size_t  blen;
+	char    header[APP_CFG_HEADER_MAX];
+	char    body[APP_CFG_BODY_MAX];
+} s_txt;
+
+/* Write ops:
+ *   START   [0x01, idx, anim, r, g, b, hlen, header]
+ *   DATA    [0x02, le16 off, body]
+ *   END     [0x03]
+ *   DISPLAY [0x20, idx]
+ *   SELECT  [0x21, idx]  (then read)
+ * Read returns: present, idx, anim,r,g,b, hlen, header, le16 blen, body. */
+static ssize_t text_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+			  const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
 {
 	const uint8_t *p = buf;
 
@@ -171,58 +306,115 @@ static ssize_t screen_write(struct bt_conn *conn, const struct bt_gatt_attr *att
 	}
 
 	switch (p[0]) {
+	case OP_META:   /* LED-only update: [op, idx, anim, r, g, b] (no body resend) */
+		if (len < 6) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		if (p[1] < APP_CFG_SCREEN_COUNT && s_cb && s_cb->on_frame_led) {
+			s_cb->on_frame_led(APP_DISP_KIND_TEXT, p[1], p[2], p[3], p[4], p[5]);
+		}
+		break;
 	case OP_START: {
-		if (len < 3) {
+		if (len < 7) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
 		uint8_t idx = p[1];
-		size_t  hlen = p[2];
 
 		if (idx >= APP_CFG_SCREEN_COUNT) {
-			s_scr.active = false;
+			s_txt.active = false;
 			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 		}
-		size_t avail = len - 3;
+		size_t hlen = p[6];
+		size_t avail = len - 7;
+
 		if (hlen > avail) {
 			hlen = avail;
 		}
-		if (hlen > sizeof(s_scr.header) - 1) {
-			hlen = sizeof(s_scr.header) - 1;
+		if (hlen > sizeof(s_txt.header) - 1) {
+			hlen = sizeof(s_txt.header) - 1;
 		}
-		memcpy(s_scr.header, p + 3, hlen);
-		s_scr.header[hlen] = '\0';
-		s_scr.hlen = hlen;
-		s_scr.idx = idx;
-		s_scr.blen = 0;
-		s_scr.active = true;
+		memcpy(s_txt.header, p + 7, hlen);
+		s_txt.header[hlen] = '\0';
+		s_txt.hlen = hlen;
+		s_txt.idx = idx;
+		s_txt.anim = p[2];
+		s_txt.r = p[3];
+		s_txt.g = p[4];
+		s_txt.b = p[5];
+		s_txt.blen = 0;
+		s_txt.active = true;
 		break;
 	}
 	case OP_DATA: {
-		if (!s_scr.active || len < 3) {
+		if (!s_txt.active || len < 3) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
 		uint16_t off = sys_get_le16(p + 1);
 		size_t   n = len - 3;
 
-		if ((size_t)off + n > sizeof(s_scr.body) - 1) {
-			s_scr.active = false;
+		if ((size_t)off + n > sizeof(s_txt.body) - 1) {
+			s_txt.active = false;
 			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 		}
-		memcpy(s_scr.body + off, p + 3, n);
-		if ((size_t)off + n > s_scr.blen) {
-			s_scr.blen = (size_t)off + n;
+		memcpy(s_txt.body + off, p + 3, n);
+		if ((size_t)off + n > s_txt.blen) {
+			s_txt.blen = (size_t)off + n;
 		}
 		break;
 	}
 	case OP_END:
-		if (s_scr.active) {
-			s_scr.body[s_scr.blen] = '\0';
-			if (s_cb && s_cb->on_screen) {
-				s_cb->on_screen(s_scr.idx, s_scr.header, s_scr.hlen,
-						s_scr.body, s_scr.blen);
+		if (s_txt.active) {
+			s_txt.body[s_txt.blen] = '\0';
+			if (s_cb && s_cb->on_frame_led) {
+				s_cb->on_frame_led(APP_DISP_KIND_TEXT, s_txt.idx,
+						   s_txt.anim, s_txt.r, s_txt.g, s_txt.b);
 			}
-			s_scr.active = false;
+			if (s_cb && s_cb->on_screen) {
+				s_cb->on_screen(s_txt.idx, s_txt.header, s_txt.hlen,
+						s_txt.body, s_txt.blen);
+			}
+			s_txt.active = false;
 		}
+		break;
+	case OP_DISPLAY:
+		if (len < 2) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		if (s_cb && s_cb->on_display) {
+			s_cb->on_display(APP_DISP_KIND_TEXT, p[1]);
+		}
+		break;
+	case OP_SELECT: {
+		uint8_t idx = (len >= 2) ? p[1] : 0;
+		const struct badge_screen *s =
+			(idx < APP_CFG_SCREEN_COUNT) ? app_config_get_screen(idx) : NULL;
+		uint8_t *q = s_rd;
+
+		*q++ = s ? 1 : 0;
+		*q++ = idx;
+		q = put_frame_led(q, APP_DISP_KIND_TEXT, idx);
+		if (s) {
+			size_t hn = strnlen(s->header, APP_CFG_HEADER_MAX - 1);
+			size_t bn = strnlen(s->body, APP_CFG_BODY_MAX - 1);
+
+			*q++ = (uint8_t)hn;
+			memcpy(q, s->header, hn);
+			q += hn;
+			sys_put_le16((uint16_t)bn, q);
+			q += 2;
+			memcpy(q, s->body, bn);
+			q += bn;
+		} else {
+			*q++ = 0;
+			sys_put_le16(0, q);
+			q += 2;
+		}
+		s_rd_len = q - s_rd;
+		s_rd_off = 0;
+		break;
+	}
+	case OP_READ_AT:
+		s_rd_off = (len >= 3) ? sys_get_le16(p + 1) : 0;
 		break;
 	default:
 		return BT_GATT_ERR(BT_ATT_ERR_NOT_SUPPORTED);
@@ -232,71 +424,95 @@ static ssize_t screen_write(struct bt_conn *conn, const struct bt_gatt_attr *att
 	return len;
 }
 
-/* f0de0006 — display a stored screen: kind, idx. */
-static ssize_t display_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-			     const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
-{
-	const uint8_t *p = buf;
-
-	if (offset != 0) {
-		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
-	}
-	if (len < 2) {
-		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
-	}
-	if (s_cb && s_cb->on_display) {
-		s_cb->on_display(p[0], p[1]);
-	}
-	note_activity();
-	return len;
-}
-
-static ssize_t name_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-			  const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
-{
-	if (offset != 0) {
-		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
-	}
-	if (s_cb && s_cb->on_name) {
-		s_cb->on_name((const char *)buf, len);
-	}
-	note_activity();
-	return len;
-}
-
-/* f0de0007 — attendee/table ID (UTF-8 string, <=10 chars). */
-static ssize_t attendee_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+/* ====================== image frame (f0de0005) ====================== */
+/* Write ops:
+ *   START   [0x01, slot, fmt, anim, r, g, b, le16 size, le16 w, le16 h] / DATA / END
+ *   DISPLAY [0x20, slot]
+ *   SELECT  [0x21, slot, want_pixels]  (then read)
+ * Read returns: present, slot, anim,r,g,b, fmt, le16 w, le16 h, le16 len,
+ *   [pixels if want_pixels]. */
+static ssize_t imgframe_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			      const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
 {
-	if (offset != 0) {
-		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
-	}
-	if (s_cb && s_cb->on_attendee) {
-		s_cb->on_attendee((const char *)buf, len);
-	}
-	note_activity();
-	return len;
-}
-
-/* f0de0008 — per-frame LED: kind, idx, anim, r, g, b. */
-static ssize_t frmled_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-			    const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
-{
 	const uint8_t *p = buf;
 
 	if (offset != 0) {
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
 	}
-	if (len < 6) {
+	if (len < 1) {
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 	}
-	if (s_cb && s_cb->on_frame_led) {
-		s_cb->on_frame_led(p[0], p[1], p[2], p[3], p[4], p[5]);
+
+	switch (p[0]) {
+	case OP_META:   /* LED-only update: [op, slot, anim, r, g, b] (no image resend) */
+		if (len < 6) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		if (p[1] < BADGE_IMAGE_SLOTS && s_cb && s_cb->on_frame_led) {
+			s_cb->on_frame_led(APP_DISP_KIND_IMAGE, p[1], p[2], p[3], p[4], p[5]);
+		}
+		break;
+	case OP_START: {
+		if (len < 13) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		uint8_t slot = p[1];
+
+		if (slot >= BADGE_IMAGE_SLOTS) {
+			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+		}
+		if (s_cb && s_cb->on_frame_led) {
+			s_cb->on_frame_led(APP_DISP_KIND_IMAGE, slot, p[3], p[4], p[5], p[6]);
+		}
+		image_xfer_start(slot, p[2] /*fmt*/, sys_get_le16(p + 7),
+				 sys_get_le16(p + 9), sys_get_le16(p + 11));
+		break;
 	}
+	case OP_DATA:
+		if (len < 3) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		image_xfer_data(sys_get_le16(p + 1), p + 3, len - 3);
+		break;
+	case OP_END:
+		if (len < 5) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		image_xfer_end(sys_get_le32(p + 1));
+		break;
+	case OP_DISPLAY:
+		if (len < 2) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		if (s_cb && s_cb->on_display) {
+			s_cb->on_display(APP_DISP_KIND_IMAGE, p[1]);
+		}
+		break;
+	case OP_SELECT: {
+		uint8_t slot = (len >= 2) ? p[1] : 0;
+		bool want_pixels = (len >= 3 && p[2]);
+		uint8_t *q = s_rd;
+
+		*q++ = badge_store_image_present(slot) ? 1 : 0;
+		*q++ = slot;
+		q = put_frame_led(q, APP_DISP_KIND_IMAGE, slot);
+		q = put_image(q, slot, want_pixels);
+		s_rd_len = q - s_rd;
+		s_rd_off = 0;
+		break;
+	}
+	case OP_READ_AT:
+		s_rd_off = (len >= 3) ? sys_get_le16(p + 1) : 0;
+		break;
+	default:
+		return BT_GATT_ERR(BT_ATT_ERR_NOT_SUPPORTED);
+	}
+
 	note_activity();
 	return len;
 }
 
+/* ====================== OTA (f0de0009 / f0de000A) ====================== */
 /* f0de0009 — OTA firmware update. Streams the trailered image built for the
  * *inactive* direct-XIP slot (raw image + 32-byte CRC trailer; see vbx_img.h)
  * into that slot. Read f0de000A first to learn which slot to send.
@@ -371,6 +587,7 @@ static ssize_t otast_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, st, sizeof(st));
 }
 
+/* ====================== keepalive (f0de000B) ====================== */
 /* f0de000B — per-connection keepalive. The laptop writes once a second (app->badge
  * liveness); the badge notifies once a second (badge->app liveness). Payload is a
  * 1-byte counter, ignored except as a ping. Must be the LAST characteristic so the
@@ -388,192 +605,29 @@ static ssize_t keepalive_write(struct bt_conn *conn, const struct bt_gatt_attr *
 	return len;
 }
 
-/* ---- Read-back: let the host fetch what's currently stored on the badge. ----
- * Zephyr's bt_gatt_attr_read + the host's read-blob handle values larger than the
- * MTU automatically, so each read serves a full serialized value. */
-
-/* Append a length-prefixed (u8 len) string; returns bytes written. */
-static size_t put_str(uint8_t *p, const char *s, size_t maxlen)
-{
-	size_t n = strnlen(s, maxlen);
-
-	p[0] = (uint8_t)n;
-	memcpy(p + 1, s, n);
-	return 1 + n;
-}
-
-/* f0de000C — config snapshot (read-only). One read returns the overview:
- *   name, fun_fact, attendee     (each: u8 len + bytes)
- *   has_color, r, g, b
- *   has_disp, disp_kind, disp_idx
- *   screen_count(u8), per screen: present(u8), hlen(u8), header[hlen]   (titles only)
- *   slot_count(u8),   per slot:   present(u8)
- * Per-screen bodies and image pixels are fetched on demand (f0de000D / f0de000E). */
-static uint8_t s_snap[1200];
-
-static ssize_t snap_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-			 void *buf, uint16_t len, uint16_t offset)
-{
-	const struct app_config *cfg = app_config_get();
-	uint8_t *p = s_snap;
-
-	p += put_str(p, cfg->name, APP_CFG_NAME_MAX - 1);
-	p += put_str(p, cfg->fun_fact, APP_CFG_FACT_MAX - 1);
-	p += put_str(p, cfg->attendee_id, APP_CFG_ATTENDEE_MAX - 1);
-	*p++ = cfg->has_color ? 1 : 0;
-	*p++ = cfg->r;
-	*p++ = cfg->g;
-	*p++ = cfg->b;
-	*p++ = cfg->has_disp ? 1 : 0;
-	*p++ = cfg->disp_kind;
-	*p++ = cfg->disp_idx;
-
-	*p++ = APP_CFG_SCREEN_COUNT;
-	for (int i = 0; i < APP_CFG_SCREEN_COUNT; i++) {
-		const struct badge_screen *s = &cfg->screens[i];
-		size_t hn = s->present ? strnlen(s->header, APP_CFG_HEADER_MAX - 1) : 0;
-
-		*p++ = s->present ? 1 : 0;
-		*p++ = (uint8_t)hn;
-		memcpy(p, s->header, hn);
-		p += hn;
-	}
-
-	*p++ = APP_CFG_IMAGE_SLOTS;
-	for (int i = 0; i < APP_CFG_IMAGE_SLOTS; i++) {
-		*p++ = badge_store_image_present(i) ? 1 : 0;
-	}
-
-	return bt_gatt_attr_read(conn, attr, buf, len, offset, s_snap, p - s_snap);
-}
-
-/* f0de000D — text screen (write index to select, then read). Read returns
- *   present(u8); if present: hlen(u8), header[hlen], le16 blen, body[blen]. */
-static uint8_t s_scr_sel;
-static uint8_t s_scrrd[3 + APP_CFG_HEADER_MAX + APP_CFG_BODY_MAX];
-
-static ssize_t scrrd_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-			   const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
-{
-	if (offset != 0) {
-		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
-	}
-	if (len < 1) {
-		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
-	}
-	s_scr_sel = ((const uint8_t *)buf)[0];
-	return len;
-}
-
-static ssize_t scrrd_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-			  void *buf, uint16_t len, uint16_t offset)
-{
-	const struct badge_screen *s =
-		(s_scr_sel < APP_CFG_SCREEN_COUNT) ? app_config_get_screen(s_scr_sel) : NULL;
-	uint8_t *p = s_scrrd;
-
-	if (s == NULL) {
-		*p++ = 0; /* not present */
-	} else {
-		size_t hn = strnlen(s->header, APP_CFG_HEADER_MAX - 1);
-		size_t bn = strnlen(s->body, APP_CFG_BODY_MAX - 1);
-
-		*p++ = 1;
-		*p++ = (uint8_t)hn;
-		memcpy(p, s->header, hn);
-		p += hn;
-		sys_put_le16((uint16_t)bn, p);
-		p += 2;
-		memcpy(p, s->body, bn);
-		p += bn;
-	}
-	return bt_gatt_attr_read(conn, attr, buf, len, offset, s_scrrd, p - s_scrrd);
-}
-
-/* f0de000E — image pixels (write slot to select, then read). The select-write
- * reads the slot from flash once into the buffer (avoids re-reading per blob
- * chunk); read returns present(u8), fmt(u8), le16 w, le16 h, le16 len, pixels[len]. */
-static uint8_t s_imgrd[8 + BADGE_IMG_GRAY2_BYTES];
-static size_t  s_imgrd_len = 8;
-
-static ssize_t imgrd_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-			   const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
-{
-	if (offset != 0) {
-		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
-	}
-	if (len < 1) {
-		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
-	}
-
-	uint8_t  slot = ((const uint8_t *)buf)[0];
-	uint8_t  fmt = 0;
-	size_t   ilen = 0;
-	uint16_t w = 0, h = 0;
-	int rc = (slot < BADGE_IMAGE_SLOTS)
-			 ? badge_store_image_read(slot, s_imgrd + 8, BADGE_IMG_GRAY2_BYTES,
-						  &fmt, &ilen, &w, &h)
-			 : -1;
-
-	if (rc == 0) {
-		s_imgrd[0] = 1;
-		s_imgrd[1] = fmt;
-		sys_put_le16(w, s_imgrd + 2);
-		sys_put_le16(h, s_imgrd + 4);
-		sys_put_le16((uint16_t)ilen, s_imgrd + 6);
-		s_imgrd_len = 8 + ilen;
-	} else {
-		memset(s_imgrd, 0, 8);
-		s_imgrd_len = 8;
-	}
-	return len;
-}
-
-static ssize_t imgrd_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-			  void *buf, uint16_t len, uint16_t offset)
-{
-	return bt_gatt_attr_read(conn, attr, buf, len, offset, s_imgrd, s_imgrd_len);
-}
-
 BT_GATT_SERVICE_DEFINE(vbx_cfg_svc,
 	BT_GATT_PRIMARY_SERVICE(&vbx_svc_uuid),
+	/* Quick-render image: draw now, not stored. */
 	BT_GATT_CHARACTERISTIC(&vbx_img_uuid.uuid,
 			       BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP,
 			       BT_GATT_PERM_WRITE, NULL, img_write, NULL),
-	BT_GATT_CHARACTERISTIC(&vbx_name_uuid.uuid,
-			       BT_GATT_CHRC_WRITE,
-			       BT_GATT_PERM_WRITE, NULL, name_write, NULL),
-	BT_GATT_CHARACTERISTIC(&vbx_screen_uuid.uuid,
-			       BT_GATT_CHRC_WRITE,
-			       BT_GATT_PERM_WRITE, NULL, screen_write, NULL),
-	BT_GATT_CHARACTERISTIC(&vbx_imgslot_uuid.uuid,
-			       BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP,
-			       BT_GATT_PERM_WRITE, NULL, imgslot_write, NULL),
-	BT_GATT_CHARACTERISTIC(&vbx_display_uuid.uuid,
-			       BT_GATT_CHRC_WRITE,
-			       BT_GATT_PERM_WRITE, NULL, display_write, NULL),
-	BT_GATT_CHARACTERISTIC(&vbx_attnd_uuid.uuid,
-			       BT_GATT_CHRC_WRITE,
-			       BT_GATT_PERM_WRITE, NULL, attendee_write, NULL),
-	BT_GATT_CHARACTERISTIC(&vbx_frmled_uuid.uuid,
-			       BT_GATT_CHRC_WRITE,
-			       BT_GATT_PERM_WRITE, NULL, frmled_write, NULL),
+	/* One read/write characteristic per frame type (write tagged by op byte;
+	 * SELECT then read to load the current frame; DISPLAY to show it now). */
+	BT_GATT_CHARACTERISTIC(&vbx_ident_uuid.uuid,
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP,
+			       BT_GATT_PERM_READ | BT_GATT_PERM_WRITE, frame_read, identity_write, NULL),
+	BT_GATT_CHARACTERISTIC(&vbx_text_uuid.uuid,
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP,
+			       BT_GATT_PERM_READ | BT_GATT_PERM_WRITE, frame_read, text_write, NULL),
+	BT_GATT_CHARACTERISTIC(&vbx_imgf_uuid.uuid,
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP,
+			       BT_GATT_PERM_READ | BT_GATT_PERM_WRITE, frame_read, imgframe_write, NULL),
 	BT_GATT_CHARACTERISTIC(&vbx_ota_uuid.uuid,
 			       BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP,
 			       BT_GATT_PERM_WRITE, NULL, ota_write_char, NULL),
 	BT_GATT_CHARACTERISTIC(&vbx_otast_uuid.uuid,
 			       BT_GATT_CHRC_READ,
 			       BT_GATT_PERM_READ, otast_read, NULL, NULL),
-	/* Read-back: config snapshot, and select-then-read for screen text / image pixels. */
-	BT_GATT_CHARACTERISTIC(&vbx_snap_uuid.uuid,
-			       BT_GATT_CHRC_READ,
-			       BT_GATT_PERM_READ, snap_read, NULL, NULL),
-	BT_GATT_CHARACTERISTIC(&vbx_scrrd_uuid.uuid,
-			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
-			       BT_GATT_PERM_READ | BT_GATT_PERM_WRITE, scrrd_read, scrrd_write, NULL),
-	BT_GATT_CHARACTERISTIC(&vbx_imgrd_uuid.uuid,
-			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
-			       BT_GATT_PERM_READ | BT_GATT_PERM_WRITE, imgrd_read, imgrd_write, NULL),
 	/* Keepalive — keep these two LAST (see keepalive_write / config_gatt_keepalive_notify). */
 	BT_GATT_CHARACTERISTIC(&vbx_keepal_uuid.uuid,
 			       BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP | BT_GATT_CHRC_NOTIFY,

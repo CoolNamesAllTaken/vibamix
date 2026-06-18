@@ -11,7 +11,7 @@ import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-from . import builder, config, flasher, usb_topology
+from . import builder, config, flasher, serial_registry, usb_topology
 from .models import Slot, Status
 
 # Event keys posted to the GUI event loop.
@@ -157,11 +157,25 @@ class Controller:
             except Exception:
                 pass
 
-        ok, msg = flasher.flash_device(slot.device, images, cb)
-        slot.status = Status.DONE if ok else Status.ERROR
-        slot.message = msg
+        # Assign (or look up) this board's unique 15-bit badge id and write it to
+        # the factory partition as part of this flash.
         try:
-            window.write_event_value(EVT_DEVICE_DONE, (slot.index, ok, msg))
+            factory_id = serial_registry.assign_for(slot.device)
+        except Exception as exc:  # id space exhausted / registry IO error
+            slot.status = Status.ERROR
+            slot.message = f"id assign failed: {exc}"
+            try:
+                window.write_event_value(EVT_DEVICE_DONE,
+                                         (slot.index, False, slot.message))
+            except Exception:
+                pass
+            return
+
+        ok, msg = flasher.flash_device(slot.device, images, cb, factory_id=factory_id)
+        slot.status = Status.DONE if ok else Status.ERROR
+        slot.message = f"{msg} (id {factory_id:04X})" if ok else msg
+        try:
+            window.write_event_value(EVT_DEVICE_DONE, (slot.index, ok, slot.message))
         except Exception:
             pass
 

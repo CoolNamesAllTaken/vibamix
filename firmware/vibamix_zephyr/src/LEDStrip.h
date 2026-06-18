@@ -50,6 +50,10 @@ public:
     // Draw one frame of the active pattern and advance its animation clock.
     void render();
 
+    // Re-assert the WS2812 power gate (PMOS on) after a prior off(), e.g. when
+    // config mode wants to light a frame's LED again. init() also does this.
+    void power_on();
+
     // Blank the chain and cut the WS2812 power gate (PMOS off), e.g. before
     // deep sleep so the strip draws no current.
     void off();

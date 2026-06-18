@@ -141,6 +141,13 @@ void LEDStrip::render()
     m_tick++;
 }
 
+void LEDStrip::power_on()
+{
+    // Re-enable the active-low PMOS gate so the WS2812 VDD rail is restored after
+    // a prior off() (which cut it). render()/commit() can then light the chain.
+    gpio_pin_configure_dt(&s_power, GPIO_OUTPUT_ACTIVE);
+}
+
 void LEDStrip::off()
 {
     // Push black out first (while still powered), then cut the power gate so

@@ -8,11 +8,17 @@ from __future__ import annotations
 
 import os
 import re
+import struct
 import subprocess
+import tempfile
 from collections.abc import Callable
 
 from . import config
 from .models import UsbDevice
+
+# Factory record written to the `factory` partition (see src/factory_id.h).
+#   off 0  u32 magic = 'VBXF' (little-endian)   off 4  u16 id   off 6  u16 ~id
+_FACTORY_ID_MAGIC = 0x46584256
 
 # Called from the worker thread with (percent 0..100, human-readable phase).
 ProgressCb = Callable[[float, str], None]
@@ -42,10 +48,46 @@ def _reset_command(dev: UsbDevice) -> list[str]:
     return [exe, "reset", "--chip", config.CHIP, "--probe", dev.selector()]
 
 
+def _write_factory_id(dev: UsbDevice, factory_id: int) -> tuple[bool, str]:
+    """Write the 8-byte factory record (magic, id, ~id) to the factory partition."""
+    if not (1 <= factory_id <= config.FACTORY_ID_MAX):
+        return False, f"factory id {factory_id} out of range"
+
+    blob = struct.pack("<IHH", _FACTORY_ID_MAGIC, factory_id,
+                       (~factory_id) & 0xFFFF)
+    path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+            f.write(blob)
+            path = f.name
+        exe = config.PROBE_RS_WRAPPER or config.PROBE_RS_BIN
+        cmd = [exe, "download", "--chip", config.CHIP,
+               "--binary-format", "bin",
+               "--base-address", hex(config.FACTORY_ID_ADDR),
+               "--probe", dev.selector(), path]
+        proc = subprocess.run(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=30)
+        if proc.returncode != 0:
+            return False, f"factory id: probe-rs exited {proc.returncode}"
+        return True, "ok"
+    except FileNotFoundError:
+        return False, "probe-rs not found"
+    except subprocess.TimeoutExpired:
+        return False, "factory id: timeout"
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
 def flash_device(
     dev: UsbDevice,
     firmwares: str | list[str],
     on_progress: ProgressCb,
+    factory_id: int | None = None,
 ) -> tuple[bool, str]:
     """Flash an ordered list of images, then reset once.  Returns ``(ok, message)``.
 
@@ -53,6 +95,10 @@ def flash_device(
     app).  They must target non-overlapping flash regions: probe-rs ``download``
     only erases the sectors each image covers, so later images don't wipe earlier
     ones.  Overall progress is split evenly across the images.
+
+    If ``factory_id`` is given, the per-unit factory record is written to the
+    `factory` partition after the images and before the reset, so the board boots
+    with its assigned id.
     """
     images = [firmwares] if isinstance(firmwares, str) else list(firmwares)
     if not images:
@@ -63,6 +109,12 @@ def flash_device(
     for i, fw in enumerate(images):
         name = _image_name(fw)
         ok, msg = _flash_one_image(dev, fw, name, i, n, on_progress)
+        if not ok:
+            return False, msg
+
+    if factory_id is not None:
+        on_progress(99.0, "factory id")
+        ok, msg = _write_factory_id(dev, factory_id)
         if not ok:
             return False, msg
 

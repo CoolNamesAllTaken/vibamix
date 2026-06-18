@@ -24,22 +24,12 @@ static int cfg_set(const char *key, size_t len, settings_read_cb read_cb, void *
 		}
 		return 0;
 	}
-	if (settings_name_steq(key, "fact", &next) && !next) {
-		rc = read_cb(cb_arg, s_cfg.fun_fact, sizeof(s_cfg.fun_fact) - 1);
-		if (rc > 0) {
-			s_cfg.fun_fact[rc] = '\0';
-		}
-		return 0;
-	}
-	if (settings_name_steq(key, "color", &next) && !next) {
-		uint8_t rgb[3];
+	if (settings_name_steq(key, "idled", &next) && !next) {
+		uint8_t v[4]; /* identity-frame LED: anim, r, g, b */
 
-		rc = read_cb(cb_arg, rgb, sizeof(rgb));
-		if (rc == sizeof(rgb)) {
-			s_cfg.r = rgb[0];
-			s_cfg.g = rgb[1];
-			s_cfg.b = rgb[2];
-			s_cfg.has_color = true;
+		rc = read_cb(cb_arg, v, sizeof(v));
+		if (rc == sizeof(v)) {
+			s_cfg.identity_led = (struct frame_led){ v[0], v[1], v[2], v[3] };
 		}
 		return 0;
 	}
@@ -150,19 +140,7 @@ void app_config_set_name(const char *s, size_t len)
 	s_cfg.has_name = true;
 	settings_save_one(CFG_SUBTREE "/name", s_cfg.name, len);
 	printk("cfg: name=\"%s\"\n", s_cfg.name);
-	/* The name/fact identity screen replaces any custom image. */
-	app_config_set_has_image(false);
-}
-
-void app_config_set_fun_fact(const char *s, size_t len)
-{
-	if (len >= sizeof(s_cfg.fun_fact)) {
-		len = sizeof(s_cfg.fun_fact) - 1;
-	}
-	memcpy(s_cfg.fun_fact, s, len);
-	s_cfg.fun_fact[len] = '\0';
-	settings_save_one(CFG_SUBTREE "/fact", s_cfg.fun_fact, len);
-	printk("cfg: fun_fact=\"%s\"\n", s_cfg.fun_fact);
+	/* The identity frame replaces any custom image. */
 	app_config_set_has_image(false);
 }
 
@@ -176,18 +154,6 @@ void app_config_set_attendee_id(const char *s, size_t len)
 	s_cfg.has_attendee = (len > 0);
 	settings_save_one(CFG_SUBTREE "/aid", s_cfg.attendee_id, len);
 	printk("cfg: attendee_id=\"%s\"\n", s_cfg.attendee_id);
-}
-
-void app_config_set_color(uint8_t r, uint8_t g, uint8_t b)
-{
-	uint8_t rgb[3] = { r, g, b };
-
-	s_cfg.r = r;
-	s_cfg.g = g;
-	s_cfg.b = b;
-	s_cfg.has_color = true;
-	settings_save_one(CFG_SUBTREE "/color", rgb, sizeof(rgb));
-	printk("cfg: color=#%02x%02x%02x\n", r, g, b);
 }
 
 void app_config_set_has_image(bool has_image)
@@ -246,7 +212,10 @@ void app_config_set_frame_led(uint8_t kind, uint8_t idx, uint8_t anim,
 	struct frame_led *led;
 	char key[24];
 
-	if (kind == APP_DISP_KIND_TEXT && idx < APP_CFG_SCREEN_COUNT) {
+	if (kind == APP_DISP_KIND_IDENTITY) {
+		led = &s_cfg.identity_led;
+		snprintf(key, sizeof(key), CFG_SUBTREE "/idled");
+	} else if (kind == APP_DISP_KIND_TEXT && idx < APP_CFG_SCREEN_COUNT) {
 		led = &s_cfg.screens[idx].led;
 		snprintf(key, sizeof(key), CFG_SUBTREE "/scr/%u/l", idx);
 	} else if (kind == APP_DISP_KIND_IMAGE && idx < APP_CFG_IMAGE_SLOTS) {
@@ -266,6 +235,10 @@ void app_config_set_frame_led(uint8_t kind, uint8_t idx, uint8_t anim,
 
 bool app_config_get_frame_led(uint8_t kind, uint8_t idx, struct frame_led *out)
 {
+	if (kind == APP_DISP_KIND_IDENTITY) {
+		*out = s_cfg.identity_led;
+		return true;
+	}
 	if (kind == APP_DISP_KIND_TEXT && idx < APP_CFG_SCREEN_COUNT) {
 		*out = s_cfg.screens[idx].led;
 		return true;

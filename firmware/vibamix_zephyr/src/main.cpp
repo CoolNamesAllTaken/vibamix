@@ -17,17 +17,31 @@
 #include "GUI.h"
 #include "MeshNode.h"
 #include "LEDStrip.h"
+#include "app_config.h"
+#include "event_status.h"
+#include "qr_screen.h"
 #include "ota.h"
 
-// How long the LEDs run after a normal boot before the device deep-sleeps. A
-// button press during this window jumps straight into config mode.
-static constexpr uint32_t kAwakeMs = 5000;
+// How long the badge stays awake after a normal boot before deep-sleeping. The
+// identity frame's bottom countdown bar counts down this window; a button press
+// during it jumps straight into config mode. Each event heartbeat (when an event
+// mesh is connected) resets the deadline to now + this window.
+static constexpr uint32_t kAwakeMs = 60 * 1000;
+static constexpr int      kAwakeTotalSec = kAwakeMs / 1000;
+
+// Full refresh every N countdown-bar repaints to clear partial-refresh ghosting.
+static constexpr int kBarFullRefreshEvery = 30;
 
 // Ignore button edges closer together than this (contact debounce).
 static constexpr uint32_t kBtnDebounceMs = 80;
 
 static const struct gpio_dt_spec user_led = GPIO_DT_SPEC_GET(DT_ALIAS(user_led), gpios);
 static const struct gpio_dt_spec user_btn = GPIO_DT_SPEC_GET(DT_ALIAS(user_button), gpios);
+
+// Antenna RF switch (U10, FM8625H): rf_sw_pwr powers the switch (VDD), rf_sw_ctl
+// selects the port. HIGH -> RF2 -> ANT2 (external antenna). See board DTS.
+static const struct gpio_dt_spec rf_sw_pwr = GPIO_DT_SPEC_GET(DT_NODELABEL(rf_sw_pwr), gpios);
+static const struct gpio_dt_spec rf_sw_ctl = GPIO_DT_SPEC_GET(DT_NODELABEL(rf_sw_ctl), gpios);
 
 static struct gpio_callback btn_cb_data;
 
@@ -112,6 +126,18 @@ int main(void)
 {
 	printk("Starting vibamix\n");
 
+	// Select the external antenna before any radio activity: power the RF switch
+	// (U10) and drive RF_SW_CTL HIGH (-> RF2 -> ANT2, the external antenna).
+	// Reconfigured on every wake since System OFF resets GPIO state.
+	if (gpio_is_ready_dt(&rf_sw_pwr))
+	{
+		gpio_pin_configure_dt(&rf_sw_pwr, GPIO_OUTPUT_ACTIVE);
+	}
+	if (gpio_is_ready_dt(&rf_sw_ctl))
+	{
+		gpio_pin_configure_dt(&rf_sw_ctl, GPIO_OUTPUT_ACTIVE);
+	}
+
 	bool config_mode = woke_from_button();
 
 	// Bring the LED strip up first so the boot animation is independent of the
@@ -150,23 +176,79 @@ int main(void)
 
 	if (!config_mode)
 	{
-		// Normal boot: draw the boot screen (custom image as-is, else identity,
-		// else "Hello World"), then run an awake window. A button press during
-		// the window promotes us straight into config mode.
-		s_mesh.apply_persisted_config();
+		// Normal boot: rest on the identity frame (the home screen; "Hello World"
+		// only on first boot with no name set), then run an awake window. A button
+		// press during the window promotes us straight into config mode.
+		s_mesh.apply_persisted_config();   // renders + set_base_map() + panel sleep
 
-		int64_t deadline = k_uptime_get() + kAwakeMs;
-		while (k_uptime_get() < deadline && !s_btn_event)
+		// Awake window: the identity frame shows a thin bottom countdown bar
+		// ticking down to power-off. When an event mesh is connected, each 1 Hz
+		// heartbeat resets the deadline to now+kAwakeMs and the banner's left text
+		// switches to the event name. A button press promotes into config mode.
+		const struct app_config *cfg = app_config_get();
+		const char *id_name  = cfg->name;
+		const char *id_table = cfg->has_attendee ? cfg->attendee_id : "";
+
+		int64_t now = k_uptime_get();
+		int64_t deadline = now + kAwakeMs;
+		bool    event_active = false;
+		int     bar_tick = 0;
+		int     last_remaining = -1;
+		int64_t last_bar_ms = 0;
+
+		// Wake the panel for the partial-refresh countdown ticks (apply_persisted_
+		// config left it asleep after the full-refresh baseline draw).
+		s_gui.wake();
+
+		while ((now = k_uptime_get()) < deadline && !s_btn_event)
 		{
+			if (event_status_consume_heartbeat())
+			{
+				deadline = now + kAwakeMs;
+				event_active = true;
+			}
+
 			if (leds_ok)
 			{
 				s_leds.render();
 			}
+
+			// Repaint the bar ~1 Hz (flash-free partial refresh; periodic full
+			// refresh clears ghosting).
+			if (now - last_bar_ms >= 1000)
+			{
+				last_bar_ms = now;
+				int remaining = (int)((deadline - now + 999) / 1000);
+				if (remaining != last_remaining)
+				{
+					last_remaining = remaining;
+					identity_countdown_overlay(
+						s_gui, id_name, id_table,
+						event_active ? event_status_name() : "",
+						remaining, kAwakeTotalSec);
+					if (++bar_tick % kBarFullRefreshEvery == 0)
+					{
+						s_gui.set_base_map();
+					}
+					else
+					{
+						s_gui.refresh_partial();
+					}
+				}
+			}
+
 			k_sleep(K_MSEC(LEDStrip::kFrameMs));
 		}
 		if (leds_ok)
 		{
 			s_leds.off();   // blank the chain + cut the LED power gate
+		}
+		// Rest on a clean, bar-free identity frame before sleeping (the bistable
+		// panel keeps whatever we leave). Skipped on a button press, which goes
+		// straight into config mode and repaints anyway.
+		if (!s_btn_event)
+		{
+			s_mesh.redraw_identity();
 		}
 		if (s_btn_event)
 		{

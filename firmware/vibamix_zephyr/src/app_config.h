@@ -10,16 +10,20 @@ extern "C" {
 #endif
 
 /*
- * Persistent badge identity (attendee name, fun fact, LED color), stored in the
- * "vibamix" settings subtree on the RRAM storage partition (ZMS backend).
+ * Persistent badge config (configurable over GATT only — the mesh surface is
+ * broadcast/ephemeral), stored in the "vibamix" settings subtree on the RRAM
+ * storage partition (ZMS backend). Three frame kinds:
+ *   - the identity frame: attendee name + ID string + optional identity image,
+ *     with its own LED color/animation shown while it is active;
+ *   - 20 text frames: title + full-screen body, each with an LED color/animation;
+ *   - 4 image frames: a stored full-screen image, each with an LED color/animation.
  *
  * Note: pushed ePaper images are NOT persisted here — the panel is bistable and
  * retains its last image across power loss, and on reboot a badge with a stored
- * name re-renders its name/fact identity screen.
+ * name re-renders its identity frame.
  */
 
 #define APP_CFG_NAME_MAX 32
-#define APP_CFG_FACT_MAX 96
 /* Attendee/table ID: a short human string (e.g. a table number), up to 10 chars. */
 #define APP_CFG_ATTENDEE_MAX 11
 
@@ -30,9 +34,10 @@ extern "C" {
 /* Image frames (must match BADGE_IMAGE_SLOTS in badge_store.h). */
 #define APP_CFG_IMAGE_SLOTS  4
 
-/* "Displayed screen" kinds (see app_config_set_display / DISPLAY_SCREEN). */
-#define APP_DISP_KIND_TEXT  0
-#define APP_DISP_KIND_IMAGE 1
+/* Frame kinds (see app_config_set_display, frame LED, mesh/GATT display). */
+#define APP_DISP_KIND_TEXT     0
+#define APP_DISP_KIND_IMAGE    1
+#define APP_DISP_KIND_IDENTITY 2
 
 /* Per-frame LED config: an animation style (see LedPattern codes) + a color. */
 struct frame_led {
@@ -48,16 +53,15 @@ struct badge_screen {
 };
 
 struct app_config {
+	/* Identity frame. */
 	char    name[APP_CFG_NAME_MAX];
-	char    fun_fact[APP_CFG_FACT_MAX];
 	char    attendee_id[APP_CFG_ATTENDEE_MAX];
-	uint8_t r, g, b;
-	bool    has_color;
+	struct frame_led identity_led;   /* LED shown while the identity frame is active */
 	bool    has_name;
 	bool    has_attendee;
 	/* A user-drawn full-screen image is currently shown. Persisted so the boot
 	 * identity redraw is skipped and the bistable image is preserved. Set when an
-	 * image is rendered; cleared when name/fact text replaces the screen. */
+	 * image is rendered; cleared when name text replaces the screen. */
 	bool    has_custom_image;
 
 	struct badge_screen screens[APP_CFG_SCREEN_COUNT];
@@ -75,9 +79,7 @@ int app_config_init(void);
 const struct app_config *app_config_get(void);
 
 void app_config_set_name(const char *s, size_t len);
-void app_config_set_fun_fact(const char *s, size_t len);
 void app_config_set_attendee_id(const char *s, size_t len);
-void app_config_set_color(uint8_t r, uint8_t g, uint8_t b);
 void app_config_set_has_image(bool has_image);
 
 /* Text screens. set persists header + body for slot `idx`. get returns NULL if

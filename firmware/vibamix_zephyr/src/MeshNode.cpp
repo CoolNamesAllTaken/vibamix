@@ -3,6 +3,7 @@
 #include "ConfigMode.h"
 #include "app_config.h"
 #include "badge_store.h"
+#include "event_status.h"
 #include "gateway_status.h"
 #include "identity.h"
 #include "image_xfer.h"
@@ -34,69 +35,36 @@ static const struct bt_mesh_prov prov = {
 
 extern "C" {
 
-static void cb_set_name(const char *name, size_t len)
-{
-    if (s_self) { s_self->on_set_name(name, len); }
-}
-
-static void cb_set_fun_fact(const char *fact, size_t len)
-{
-    if (s_self) { s_self->on_set_fun_fact(fact, len); }
-}
-
-static void cb_set_led_color(uint8_t r, uint8_t g, uint8_t b)
-{
-    if (s_self) { s_self->on_set_led_color(r, g, b); }
-}
-
 static void cb_image(uint8_t slot, uint8_t fmt, const uint8_t *buf, size_t len,
                      uint16_t w, uint16_t h)
 {
     if (s_self) { s_self->on_image(slot, fmt, buf, len, w, h); }
 }
 
-static void cb_heartbeat(void)
+static void cb_heartbeat(const char *name, size_t len)
 {
-    config_mode_on_heartbeat();   // keep an awake badge awake
+    event_status_note_heartbeat(name, len);   // latch event name; wake mesh-mode loop
+    config_mode_on_heartbeat();               // keep a config-mode badge awake too
 }
 
-static void cb_set_screen(uint8_t idx, const char *hdr, size_t hlen,
-                          const char *body, size_t blen)
+static void cb_show_led(uint8_t anim, uint8_t r, uint8_t g, uint8_t b)
 {
-    if (s_self) { s_self->on_set_screen(idx, hdr, hlen, body, blen); }
-    config_mode_on_heartbeat();
+    if (s_self) { s_self->on_show_led(anim, r, g, b); }
+    config_mode_on_heartbeat();   // LEDs only — keep awake, no screen takeover
 }
 
-static void cb_display(uint8_t kind, uint8_t idx)
+static void cb_show_text(const char *title, size_t tlen, const char *body, size_t blen)
 {
-    if (s_self) { s_self->on_display_screen(kind, idx); }
-    config_mode_on_content();     // a command screen took over; keep awake
-}
-
-static void cb_set_attendee(const char *id, size_t len)
-{
-    if (s_self) { s_self->on_set_attendee_id(id, len); }
-    config_mode_on_heartbeat();
-}
-
-static void cb_set_frame_led(uint8_t kind, uint8_t idx, uint8_t anim,
-                             uint8_t r, uint8_t g, uint8_t b)
-{
-    if (s_self) { s_self->on_set_frame_led(kind, idx, anim, r, g, b); }
-    config_mode_on_heartbeat();
+    if (s_self) { s_self->on_show_text(title, tlen, body, blen); }
+    config_mode_on_content();     // a text frame took over the panel; keep awake
 }
 
 } // extern "C"
 
 static const struct mesh_config_handlers s_handlers = {
-    .set_name       = cb_set_name,
-    .set_fun_fact   = cb_set_fun_fact,
-    .set_led_color  = cb_set_led_color,
-    .heartbeat      = cb_heartbeat,
-    .set_screen     = cb_set_screen,
-    .display_screen = cb_display,
-    .set_attendee   = cb_set_attendee,
-    .set_frame_led  = cb_set_frame_led,
+    .heartbeat = cb_heartbeat,
+    .show_led  = cb_show_led,
+    .show_text = cb_show_text,
 };
 
 int MeshNode::init(GUI *gui, LEDStrip *leds)
@@ -171,22 +139,14 @@ void MeshNode::apply_persisted_config()
 {
     const struct app_config *cfg = app_config_get();
 
-    if (cfg->has_color && m_leds) {
-        m_leds->set_color(cfg->r, cfg->g, cfg->b);
-    }
-    // If a frame is the resting content and it has a per-frame LED, that wins.
-    if (cfg->has_disp) {
-        apply_frame_led(cfg->disp_kind, cfg->disp_idx);
-    }
+    // The identity frame is home: apply its LED (animation + color) on boot.
+    apply_frame_led(APP_DISP_KIND_IDENTITY, 0);
 
     // Single boot-display authority. The panel was left awake by GUI::init().
     if (!m_gui) {
         return;
     }
-    if (cfg->has_custom_image) {
-        // Leave the user's bistable image untouched; just release the panel.
-        m_gui->sleep();
-    } else if (cfg->has_name) {
+    if (cfg->has_name) {
         redraw_identity();
     } else {
         // First boot, nothing configured yet.
@@ -201,9 +161,21 @@ void MeshNode::redraw_identity()
         return;
     }
     const struct app_config *cfg = app_config_get();
+
+    // Optional identity image (gray2) drawn below the name/ID banner.
+    const uint8_t *img = nullptr;
+    uint8_t  fmt = 0;
+    size_t   len = 0;
+    uint16_t w = 0, h = 0;
+    if (badge_store_image_read(BADGE_SLOT_IDENTITY, s_img_stage, sizeof(s_img_stage),
+                               &fmt, &len, &w, &h) == 0) {
+        img = s_img_stage;
+    }
+
     m_gui->wake();
     identity_screen_draw(*m_gui, cfg->name, cfg->has_attendee ? cfg->attendee_id : "",
-                         cfg->fun_fact);
+                         img, fmt, w, h);
+    m_gui->set_base_map();   // push the framebuffer to the panel (full refresh)
     m_gui->sleep();
 }
 
@@ -221,44 +193,51 @@ void MeshNode::apply_frame_led(uint8_t kind, uint8_t idx)
 void MeshNode::on_set_name(const char *name, size_t len)
 {
     app_config_set_name(name, len);
-    // As a connected gateway, record the relayed command for the status banner and
-    // skip the (build-only) identity redraw so it doesn't churn the gateway screen.
+    // While a phone is connected, just store — don't churn the panel (the Connected
+    // screen / shown frame stays). The next resting redraw picks up the new name.
     if (gateway_status_active()) {
-        gateway_status_note(GW_CMD_NAME);
         return;
     }
     redraw_identity();
 }
 
-void MeshNode::on_set_fun_fact(const char *fact, size_t len)
+void MeshNode::on_show_led(uint8_t anim, uint8_t r, uint8_t g, uint8_t b)
 {
-    app_config_set_fun_fact(fact, len);
-    if (gateway_status_active()) {
-        gateway_status_note(GW_CMD_FUNFACT);
-        return;
-    }
-    redraw_identity();
-}
-
-void MeshNode::on_set_led_color(uint8_t r, uint8_t g, uint8_t b)
-{
-    app_config_set_color(r, g, b);
+    // Mesh broadcast: override the live LEDs on every badge. Not stored — the
+    // next frame display (or a reboot) restores that frame's own LED config.
     if (m_leds) {
-        m_leds->set_color(r, g, b);   // applied on the gateway too
+        m_leds->set_anim(led_pattern_from_code(anim), r, g, b);
     }
     if (gateway_status_active()) {
         gateway_status_note(GW_CMD_LED);
     }
 }
 
+void MeshNode::on_show_text(const char *title, size_t tlen, const char *body, size_t blen)
+{
+    ARG_UNUSED(tlen);
+    ARG_UNUSED(blen);
+    if (!m_gui) {
+        return;
+    }
+    // Mesh broadcast: draw the text frame straight to the panel. Not stored, so a
+    // reboot returns to the identity frame. Mirror on_display_screen's gateway
+    // handling so a connected gateway overlays its relay banner and stays awake.
+    if (gateway_status_active()) {
+        gateway_status_note(GW_CMD_SCREEN);
+    }
+    m_gui->wake();
+    m_gui->show_text(title, body);
+    m_gui->sleep();
+}
+
 void MeshNode::on_set_attendee_id(const char *id, size_t len)
 {
     app_config_set_attendee_id(id, len);
     if (gateway_status_active()) {
-        gateway_status_note(GW_CMD_ATTENDEE);
-        return;
+        return;   // connected: store only, don't churn the panel
     }
-    redraw_identity();   // table ID lives on the identity screen
+    redraw_identity();   // table ID lives on the identity frame
 }
 
 void MeshNode::on_set_frame_led(uint8_t kind, uint8_t idx, uint8_t anim,
@@ -266,19 +245,32 @@ void MeshNode::on_set_frame_led(uint8_t kind, uint8_t idx, uint8_t anim,
 {
     app_config_set_frame_led(kind, idx, anim, r, g, b);
 
-    // If this is the frame currently on screen, apply it live.
+    // If this is the frame currently on screen, apply it live. The identity frame
+    // is the default, so treat "no explicit display yet" as showing identity.
     const struct app_config *cfg = app_config_get();
-    if (cfg->has_disp && cfg->disp_kind == kind && cfg->disp_idx == idx) {
-        apply_frame_led(kind, idx);
+    bool shown;
+    if (kind == APP_DISP_KIND_IDENTITY) {
+        shown = !cfg->has_disp || cfg->disp_kind == APP_DISP_KIND_IDENTITY;
+    } else {
+        shown = cfg->has_disp && cfg->disp_kind == kind && cfg->disp_idx == idx;
     }
-    if (gateway_status_active()) {
-        gateway_status_note(GW_CMD_FRAMELED);
+    if (shown) {
+        apply_frame_led(kind, idx);
     }
 }
 
 void MeshNode::on_image(uint8_t slot, uint8_t fmt, const uint8_t *buf, size_t len,
                         uint16_t w, uint16_t h)
 {
+    // Identity image: store it, then recompose the identity frame (banner + image)
+    // rather than blitting it full-screen.
+    if (slot == BADGE_SLOT_IDENTITY) {
+        uint32_t crc = crc32_ieee(buf, len);
+        badge_store_image_write(BADGE_SLOT_IDENTITY, fmt, buf, len, w, h, crc);
+        redraw_identity();
+        apply_frame_led(APP_DISP_KIND_IDENTITY, 0);
+        return;
+    }
     if (slot < BADGE_IMAGE_SLOTS) {
         uint32_t crc = crc32_ieee(buf, len);
         badge_store_image_write(slot, fmt, buf, len, w, h, crc);
@@ -303,9 +295,6 @@ void MeshNode::on_set_screen(uint8_t idx, const char *hdr, size_t hlen,
                              const char *body, size_t blen)
 {
     app_config_set_screen(idx, hdr, hlen, body, blen);
-    if (gateway_status_active()) {
-        gateway_status_note(GW_CMD_SCREEN);
-    }
 }
 
 void MeshNode::on_display_screen(uint8_t kind, uint8_t idx)
@@ -314,11 +303,18 @@ void MeshNode::on_display_screen(uint8_t kind, uint8_t idx)
         return;
     }
 
-    // A connected gateway shows the displayed content (it applies the command) with
-    // the status banner; mark the screen taken over so the countdown stops repainting.
+    // Force-display over GATT: take over the panel (stop the connected-screen
+    // repaint) and keep the "Connected" overlay on the shown frame. No gateway
+    // "Broadcast" note — this is a direct command, not a relayed mesh broadcast.
     if (gateway_status_active()) {
-        gateway_status_note(GW_CMD_DISPLAY);
         config_mode_on_content();
+    }
+
+    if (kind == APP_DISP_KIND_IDENTITY) {
+        redraw_identity();
+        app_config_set_display(APP_DISP_KIND_IDENTITY, 0);
+        apply_frame_led(APP_DISP_KIND_IDENTITY, 0);
+        return;
     }
 
     if (kind == APP_DISP_KIND_TEXT) {

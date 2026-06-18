@@ -23,6 +23,7 @@ target_sources(app PRIVATE
   src/image_xfer.c
   src/app_config.c
   src/identity.c
+  src/factory_id.c
   src/qr_screen.cpp
   src/config_gatt.c
   src/ConfigMode.cpp
@@ -31,6 +32,7 @@ target_sources(app PRIVATE
   src/dither.c
   src/ota.c
   src/gateway_status.cpp
+  src/event_status.cpp
   ../common/bl_state.c
 )
 

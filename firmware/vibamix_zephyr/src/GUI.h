@@ -14,7 +14,7 @@ public:
     void wake();
 
     // Draw the badge identity screen: name (large) + fun fact (wrapped).
-    void show_text(const char *name, const char *fun_fact);
+    void show_text(const char *name, const char *body);
 
     // Blit a full 1bpp framebuffer to the panel. `buf` is normally framebuffer()
     // itself (image_xfer reassembles straight into it), so no copy is needed.

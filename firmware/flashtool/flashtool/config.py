@@ -85,6 +85,17 @@ PROBE_VID_PIDS: set[tuple[int, int]] = {
 # --- Bench config ------------------------------------------------------------
 _CONFIG_DIR: Path = Path(__file__).parent / "usb_hubs"
 
+# --- Per-unit factory id assignment ------------------------------------------
+# Each board is assigned a unique 15-bit id (1..0x7FFF) written to the `factory`
+# flash partition; the firmware uses it as the mesh unicast address / config code
+# / GAP name so a large fleet doesn't collide (see src/factory_id.c).  The
+# registry persists the next id + a probe-serial->id map so re-flashing a board
+# reuses its id.  BACK THIS FILE UP — losing it restarts ids at 1 and risks
+# duplicate ids on already-flashed badges.
+FACTORY_ID_ADDR: int = 0x164000              # start of the `factory` partition
+FACTORY_ID_MAX: int = 0x7FFF                 # 15-bit mesh unicast ceiling
+SERIAL_REGISTRY: Path = _CONFIG_DIR / "serials.json"
+
 
 def list_bench_configs() -> list[Path]:
     """Return all bench config files in _CONFIG_DIR, named ones then bench.json."""

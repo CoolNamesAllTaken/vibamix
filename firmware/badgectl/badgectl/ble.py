@@ -171,114 +171,153 @@ class BadgeLink:
         assert self.client is not None
         await self.client.write_gatt_char(uuid, data, response=response)
 
-    # --- direct GATT config ---
-    async def set_name(self, name: str) -> None:
-        await self._w(keys.UUID_CHR_NAME, name.encode("utf-8"))
+    async def _read_serialized(self, uuid: str) -> bytes:
+        """Read a SELECT-serialized frame in <=MTU windows.
 
+        macOS/CoreBluetooth caps a single characteristic read at 512 B, but a
+        serialized image frame is multi-KB. The badge exposes an app-level read
+        window (GOP_READ_AT): we move the base, read a chunk, and repeat until a
+        read past the end returns nothing. Call after the SELECT write."""
+        assert self.client is not None
+        out = bytearray()
+        off = 0
+        while True:
+            await self._w(uuid, bytes([keys.GOP_READ_AT]) + _le16(off))
+            chunk = await self.client.read_gatt_char(uuid)
+            if not chunk:
+                break
+            out += chunk
+            off += len(chunk)
+        return bytes(out)
+
+    # --- direct GATT config: one read/write characteristic per frame type ---
     async def _upload(self, uuid, start, payload, crc, on_progress) -> None:
         await self._w(uuid, start)
         chunk = self._chunk(3)  # DATA header = op + u16 offset
         off, n = 0, len(payload)
         while off < n:
             part = payload[off : off + chunk]
-            await self._w(uuid, bytes([keys.FRAME_DATA]) + _le16(off) + part)
+            await self._w(uuid, bytes([keys.GOP_DATA]) + _le16(off) + part)
             off += len(part)
             if on_progress:
                 on_progress(off, n)
-        await self._w(uuid, bytes([keys.FRAME_END]) + struct.pack("<I", crc))
+        await self._w(uuid, bytes([keys.GOP_END]) + struct.pack("<I", crc))
 
     async def upload_image(self, fb: bytes, on_progress=None) -> None:
+        """Quick render (f0de0002): draw a 1bpp image now, not stored."""
         crc = zlib.crc32(fb) & 0xFFFFFFFF
-        start = bytes([keys.FRAME_START]) + _le16(len(fb)) + _le16(176) + _le16(264)
+        start = bytes([keys.GOP_START]) + _le16(len(fb)) + _le16(176) + _le16(264)
         await self._upload(keys.UUID_CHR_IMAGE, start, fb, crc, on_progress)
 
-    async def upload_image_slot(self, slot: int, fmt: int, payload: bytes, on_progress=None) -> None:
+    # -- identity frame (f0de0003) --
+    async def write_identity_meta(self, name: str, id_str: str,
+                                  anim: int, r: int, g: int, b: int) -> None:
+        n = name.encode("utf-8")[:31]
+        i = id_str.encode("utf-8")[:10]
+        payload = (bytes([keys.GOP_META, len(n)]) + n + bytes([len(i)]) + i
+                   + bytes([anim, r, g, b]))
+        await self._w(keys.UUID_IDENTITY, payload)
+
+    async def upload_identity_image(self, payload: bytes, on_progress=None) -> None:
+        """Identity-frame image (gray2), drawn behind the name/ID banner."""
         crc = zlib.crc32(payload) & 0xFFFFFFFF
-        w, h = (176, 264) if fmt == keys.FMT_BW else (264, 176)
-        start = bytes([keys.FRAME_START, slot, fmt]) + _le16(len(payload)) + _le16(w) + _le16(h)
-        await self._upload(keys.UUID_CHR_IMGSLOT, start, payload, crc, on_progress)
+        start = (bytes([keys.GOP_START, keys.FMT_GRAY2])
+                 + _le16(len(payload)) + _le16(264) + _le16(176))
+        await self._upload(keys.UUID_IDENTITY, start, payload, crc, on_progress)
 
-    async def set_screen(self, idx: int, header: str, body: str, on_progress=None) -> None:
-        h = header.encode("utf-8")[:47]
-        b = body.encode("utf-8")
-        await self._w(keys.UUID_CHR_SCREEN, bytes([keys.FRAME_START, idx, len(h)]) + h)
-        chunk = self._chunk(3)
-        off = 0
-        while off < len(b):
-            part = b[off : off + chunk]
-            await self._w(keys.UUID_CHR_SCREEN, bytes([keys.FRAME_DATA]) + _le16(off) + part)
-            off += len(part)
-            if on_progress:
-                on_progress(off, len(b))
-        await self._w(keys.UUID_CHR_SCREEN, bytes([keys.FRAME_END]))
-
-    async def display(self, kind: int, idx: int) -> None:
-        await self._w(keys.UUID_CHR_DISPLAY, bytes([kind, idx]))
-
-    # --- read back the badge's stored config ---
-    async def read_config_snapshot(self) -> dict:
-        """Overview of stored config from f0de000C (name/fact/attendee/color/display,
-        screen titles + presence, image-slot presence)."""
+    async def read_identity(self, want_pixels: bool = False) -> dict:
         assert self.client is not None
-        v = await self.client.read_gatt_char(keys.UUID_CHR_CFG_SNAPSHOT)
+        await self._w(keys.UUID_IDENTITY, bytes([keys.GOP_SELECT, 1 if want_pixels else 0]))
+        v = await self._read_serialized(keys.UUID_IDENTITY)
         o = 0
         name, o = _get_str(v, o)
-        fact, o = _get_str(v, o)
         attendee, o = _get_str(v, o)
-        has_color, r, g, b = v[o], v[o + 1], v[o + 2], v[o + 3]
+        led = {"anim": v[o], "r": v[o + 1], "g": v[o + 2], "b": v[o + 3]}
         o += 4
-        has_disp, disp_kind, disp_idx = v[o], v[o + 1], v[o + 2]
-        o += 3
-        scount = v[o]
-        o += 1
-        screens = []
-        for _ in range(scount):
-            present, hlen = v[o], v[o + 1]
-            o += 2
-            title = v[o : o + hlen].decode("utf-8", "replace")
-            o += hlen
-            screens.append({"present": bool(present), "title": title})
-        slcount = v[o]
-        o += 1
-        slots = [{"present": bool(v[o + i])} for i in range(slcount)]
-        return {
-            "name": name,
-            "fun_fact": fact,
-            "attendee": attendee,
-            "color": {"has": bool(has_color), "r": r, "g": g, "b": b},
-            "display": {"has": bool(has_disp), "kind": disp_kind, "idx": disp_idx},
-            "screens": screens,
-            "slots": slots,
-        }
+        img = {"present": bool(v[o]), "fmt": v[o + 1],
+               "w": int.from_bytes(v[o + 2:o + 4], "little"),
+               "h": int.from_bytes(v[o + 4:o + 6], "little")}
+        ln = int.from_bytes(v[o + 6:o + 8], "little")
+        o += 8
+        if want_pixels and img["present"]:
+            img["pixels"] = bytes(v[o:o + ln])
+        return {"name": name, "attendee": attendee, "led": led, "image": img}
 
-    async def read_screen(self, idx: int) -> dict:
-        """Full header+body of stored text screen `idx` (select-write then read f0de000D)."""
+    # -- text frame (f0de0004) --
+    async def write_text_frame(self, idx: int, anim: int, r: int, g: int, b: int,
+                               title: str, body: str, on_progress=None) -> None:
+        h = title.encode("utf-8")[:47]
+        bb = body.encode("utf-8")
+        await self._w(keys.UUID_TEXT_FRAME,
+                      bytes([keys.GOP_START, idx, anim, r, g, b, len(h)]) + h)
+        chunk = self._chunk(3)
+        off = 0
+        while off < len(bb):
+            part = bb[off:off + chunk]
+            await self._w(keys.UUID_TEXT_FRAME, bytes([keys.GOP_DATA]) + _le16(off) + part)
+            off += len(part)
+            if on_progress:
+                on_progress(off, len(bb))
+        await self._w(keys.UUID_TEXT_FRAME, bytes([keys.GOP_END]))
+
+    async def write_text_led(self, idx: int, anim: int, r: int, g: int, b: int) -> None:
+        """Update only a text frame's LED (no body resend)."""
+        await self._w(keys.UUID_TEXT_FRAME, bytes([keys.GOP_META, idx, anim, r, g, b]))
+
+    async def read_text_frame(self, idx: int) -> dict:
         assert self.client is not None
-        await self._w(keys.UUID_CHR_SCREEN_READ, bytes([idx]))
-        v = await self.client.read_gatt_char(keys.UUID_CHR_SCREEN_READ)
-        if not v or v[0] == 0:
-            return {"present": False, "header": "", "body": ""}
-        hlen = v[1]
-        o = 2
-        header = v[o : o + hlen].decode("utf-8", "replace")
+        await self._w(keys.UUID_TEXT_FRAME, bytes([keys.GOP_SELECT, idx]))
+        v = await self._read_serialized(keys.UUID_TEXT_FRAME)
+        present = bool(v[0])
+        led = {"anim": v[2], "r": v[3], "g": v[4], "b": v[5]}
+        o = 6
+        hlen = v[o]
+        o += 1
+        header = v[o:o + hlen].decode("utf-8", "replace")
         o += hlen
-        blen = int.from_bytes(v[o : o + 2], "little")
+        blen = int.from_bytes(v[o:o + 2], "little")
         o += 2
-        body = v[o : o + blen].decode("utf-8", "replace")
-        return {"present": True, "header": header, "body": body}
+        body = v[o:o + blen].decode("utf-8", "replace")
+        return {"present": present, "idx": v[1], "led": led, "header": header, "body": body}
 
-    async def read_image(self, slot: int) -> dict:
-        """Raw pixels + format of stored image slot (select-write then read f0de000E)."""
+    # -- image frame (f0de0005) --
+    async def write_image_frame(self, slot: int, fmt: int, anim: int, r: int, g: int, b: int,
+                                payload: bytes, on_progress=None) -> None:
+        crc = zlib.crc32(payload) & 0xFFFFFFFF
+        w, h = (176, 264) if fmt == keys.FMT_BW else (264, 176)
+        start = (bytes([keys.GOP_START, slot, fmt, anim, r, g, b])
+                 + _le16(len(payload)) + _le16(w) + _le16(h))
+        await self._upload(keys.UUID_IMAGE_FRAME, start, payload, crc, on_progress)
+
+    async def write_image_led(self, slot: int, anim: int, r: int, g: int, b: int) -> None:
+        """Update only an image frame's LED (no image resend)."""
+        await self._w(keys.UUID_IMAGE_FRAME, bytes([keys.GOP_META, slot, anim, r, g, b]))
+
+    async def read_image_frame(self, slot: int, want_pixels: bool = False) -> dict:
         assert self.client is not None
-        await self._w(keys.UUID_CHR_IMAGE_READ, bytes([slot]))
-        v = await self.client.read_gatt_char(keys.UUID_CHR_IMAGE_READ)
-        if len(v) < 8 or v[0] == 0:
-            return {"present": False}
-        fmt = v[1]
-        w = int.from_bytes(v[2:4], "little")
-        h = int.from_bytes(v[4:6], "little")
-        ln = int.from_bytes(v[6:8], "little")
-        return {"present": True, "fmt": fmt, "w": w, "h": h, "pixels": bytes(v[8 : 8 + ln])}
+        await self._w(keys.UUID_IMAGE_FRAME, bytes([keys.GOP_SELECT, slot, 1 if want_pixels else 0]))
+        v = await self._read_serialized(keys.UUID_IMAGE_FRAME)
+        # Layout: present, slot, anim,r,g,b, then put_image() block which leads with
+        # its own (duplicate) present byte at v[6] before fmt — hence the +1 offsets.
+        present = bool(v[0])
+        led = {"anim": v[2], "r": v[3], "g": v[4], "b": v[5]}
+        fmt = v[7]
+        w = int.from_bytes(v[8:10], "little")
+        h = int.from_bytes(v[10:12], "little")
+        ln = int.from_bytes(v[12:14], "little")
+        out = {"present": present, "slot": v[1], "led": led, "fmt": fmt, "w": w, "h": h}
+        if want_pixels and present:
+            out["pixels"] = bytes(v[14:14 + ln])
+        return out
+
+    # -- force-display a stored frame (folded into each frame characteristic) --
+    async def display(self, kind: int, idx: int = 0) -> None:
+        if kind == keys.DISP_KIND_IDENTITY:
+            await self._w(keys.UUID_IDENTITY, bytes([keys.GOP_DISPLAY]))
+        elif kind == keys.DISP_KIND_TEXT:
+            await self._w(keys.UUID_TEXT_FRAME, bytes([keys.GOP_DISPLAY, idx]))
+        else:
+            await self._w(keys.UUID_IMAGE_FRAME, bytes([keys.GOP_DISPLAY, idx]))
 
     # --- firmware OTA (trailered direct-XIP image -> inactive slot) ---
     async def read_ota_status(self) -> tuple[int, int, int]:
