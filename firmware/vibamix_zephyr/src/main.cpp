@@ -182,6 +182,74 @@ static void enter_deep_sleep(void)
 	sys_poweroff();
 }
 
+// Identity-frame awake window: rest on the identity frame and tick a thin bottom
+// countdown bar down to deep sleep. Each 1 Hz event-mesh heartbeat resets the
+// deadline (and switches the bar's left text to the event name), so the badge stays
+// awake for the duration of an event ("mesh mode"). Returns true if the user button
+// was pressed (caller re-enters config mode), false on timeout (caller deep-sleeps).
+// The caller must have established the identity frame as the panel base first (via
+// apply_persisted_config / redraw_identity).
+static bool run_awake_window(void)
+{
+	// Drop a still-held / already-latched press (e.g. the one that just exited config
+	// mode) so the window doesn't close the instant it opens.
+	wait_button_release();
+	s_btn_event = false;
+
+	const struct app_config *cfg = app_config_get();
+	const char *id_name  = cfg->name;
+	const char *id_table = cfg->has_attendee ? cfg->attendee_id : "";
+
+	int64_t now = k_uptime_get();
+	int64_t deadline = now + kAwakeMs;
+	bool    event_active = false;
+	int     bar_tick = 0;
+	int     last_remaining = -1;
+	int64_t last_bar_ms = 0;
+
+	// Wake the panel for the partial-refresh countdown ticks (the identity redraw
+	// left it asleep after its full-refresh baseline draw).
+	s_gui.wake();
+
+	while ((now = k_uptime_get()) < deadline && !s_btn_event)
+	{
+		if (event_status_consume_heartbeat())
+		{
+			deadline = now + kAwakeMs;
+			event_active = true;
+		}
+
+		// (LEDs animate on their own thread; see LEDStrip::init.)
+
+		// Repaint the bar ~1 Hz (flash-free partial refresh; periodic full refresh
+		// clears ghosting).
+		if (now - last_bar_ms >= 1000)
+		{
+			last_bar_ms = now;
+			int remaining = (int)((deadline - now + 999) / 1000);
+			if (remaining != last_remaining)
+			{
+				last_remaining = remaining;
+				identity_countdown_overlay(
+					s_gui, id_name, id_table,
+					event_active ? event_status_name() : "",
+					remaining, kAwakeTotalSec);
+				if (++bar_tick % kBarFullRefreshEvery == 0)
+				{
+					s_gui.set_base_map();
+				}
+				else
+				{
+					s_gui.refresh_partial();
+				}
+			}
+		}
+
+		k_sleep(K_MSEC(LEDStrip::kFrameMs));
+	}
+	return s_btn_event;
+}
+
 int main(void)
 {
 	printk("Starting vibamix\n");
@@ -237,108 +305,62 @@ int main(void)
 	if (!config_mode)
 	{
 		// Normal boot: rest on the identity frame (the home screen; "Hello World"
-		// only on first boot with no name set), then run an awake window. A button
-		// press during the window promotes us straight into config mode.
+		// only on first boot with no name set). The config<->countdown loop below
+		// then runs the awake window on top of it.
 		s_mesh.apply_persisted_config();   // renders + set_base_map() + panel sleep
-
-		// Awake window: the identity frame shows a thin bottom countdown bar
-		// ticking down to power-off. When an event mesh is connected, each 1 Hz
-		// heartbeat resets the deadline to now+kAwakeMs and the banner's left text
-		// switches to the event name. A button press promotes into config mode.
-		const struct app_config *cfg = app_config_get();
-		const char *id_name  = cfg->name;
-		const char *id_table = cfg->has_attendee ? cfg->attendee_id : "";
-
-		int64_t now = k_uptime_get();
-		int64_t deadline = now + kAwakeMs;
-		bool    event_active = false;
-		int     bar_tick = 0;
-		int     last_remaining = -1;
-		int64_t last_bar_ms = 0;
-
-		// Wake the panel for the partial-refresh countdown ticks (apply_persisted_
-		// config left it asleep after the full-refresh baseline draw).
-		s_gui.wake();
-
-		while ((now = k_uptime_get()) < deadline && !s_btn_event)
-		{
-			if (event_status_consume_heartbeat())
-			{
-				deadline = now + kAwakeMs;
-				event_active = true;
-			}
-
-			// (LEDs animate on their own thread; see LEDStrip::init.)
-
-			// Repaint the bar ~1 Hz (flash-free partial refresh; periodic full
-			// refresh clears ghosting).
-			if (now - last_bar_ms >= 1000)
-			{
-				last_bar_ms = now;
-				int remaining = (int)((deadline - now + 999) / 1000);
-				if (remaining != last_remaining)
-				{
-					last_remaining = remaining;
-					identity_countdown_overlay(
-						s_gui, id_name, id_table,
-						event_active ? event_status_name() : "",
-						remaining, kAwakeTotalSec);
-					if (++bar_tick % kBarFullRefreshEvery == 0)
-					{
-						s_gui.set_base_map();
-					}
-					else
-					{
-						s_gui.refresh_partial();
-					}
-				}
-			}
-
-			k_sleep(K_MSEC(LEDStrip::kFrameMs));
-		}
-		// A button press during the window promotes straight into config mode (which
-		// repaints). Otherwise we fall through to enter_deep_sleep(), which blanks the
-		// LEDs and rests the panel on the bar-free "asleep" identity frame.
-		if (s_btn_event)
-		{
-			config_mode = true;
-		}
 	}
 
-	if (config_mode)
+	// Config <-> identity-countdown loop. Pressing the button in config mode drops
+	// back to the identity frame and counts down to sleep (staying awake while an
+	// event mesh heartbeats); pressing it during the countdown promotes back into
+	// config mode. Only a countdown that times out with no event reaches deep sleep.
+	for (;;)
 	{
-		// Woken by button (or promoted above): show the ID + QR and stay awake so
-		// a phone can connect over the custom GATT service and upload a badge.
-		printk("Entering config mode\n");
-		if (leds_ok)
+		if (config_mode)
 		{
-			s_leds.off();   // keep it dark during config; battery-friendly
-		}
-		s_config.run(&s_gui, &s_mesh, &user_btn);
-	}
+			// Woken by button (or promoted from the countdown): show the ID + QR and
+			// stay awake so a phone can connect over GATT and upload a badge.
+			printk("Entering config mode\n");
+			if (leds_ok)
+			{
+				s_leds.off();   // keep it dark during config; battery-friendly
+			}
+			s_config.run(&s_gui, &s_mesh, &user_btn);
+			config_mode = false;
 
-	// Under a debugger, stay awake instead of entering System OFF: a powered-down
-	// core can't be cleanly reset/halted, so "reset device" would be slow and
-	// unpredictable. Standalone, the button enters config mode by waking from
-	// System OFF; with no System OFF here, poll for the press ourselves so the
-	// button still works (otherwise it's dead once we drop into the idle thread).
-	if (debugger_attached())
-	{
-		printk("Debugger attached - staying awake (skipping System OFF); press button for config mode\n");
-		for (;;)
+			// Config left the QR / a pushed image on the panel — restore the identity
+			// frame (and its LED) so the countdown window rests on it.
+			if (leds_ok)
+			{
+				s_leds.power_on();
+			}
+			s_mesh.apply_persisted_config();
+		}
+
+		// Identity-frame countdown to sleep (heartbeat-aware "mesh mode").
+		if (run_awake_window())
 		{
-			wait_button_release();   // ignore a still-held entering/exit press
+			config_mode = true;   // button pressed during the countdown -> config
+			continue;
+		}
+
+		// Timed out with no event. Under a debugger we can't cleanly enter System OFF
+		// (a powered-down core can't be reset/halted), so wait for the next button
+		// press to re-enter config instead of sleeping.
+		if (debugger_attached())
+		{
+			printk("Debugger attached - staying awake (skipping System OFF); press button for config mode\n");
+			wait_button_release();
 			s_btn_event = false;
 			while (!s_btn_event)
 			{
 				k_sleep(K_MSEC(50));
 			}
-			if (leds_ok)
-			{
-				s_leds.off();
-			}
-			s_config.run(&s_gui, &s_mesh, &user_btn);
+			config_mode = true;
+			continue;
 		}
+
+		break;
 	}
 
 	// Centralized deep-sleep: LEDs off, asleep frame, GPIO power-down, button armed
