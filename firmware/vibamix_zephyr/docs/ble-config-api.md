@@ -382,9 +382,32 @@ but with **u32** size/offset (the image far exceeds 64 KB). All fields little‑
   right after END as success, then re‑scan/reconnect.
 - The new image **self‑confirms** once it boots far enough to bring BLE/mesh up. An image that
   crashes/resets, **or hangs**, before confirming is **auto‑reverted**: the bootloader counts the
-  trial boot and arms the watchdog, so the next boot drops the unconfirmed image and runs the
-  previous confirmed slot.
+  trial boot and arms a watchdog (**30 s** to reach confirm), giving the image up to
+  **3 trial boots** before it drops the unconfirmed image and runs the previous confirmed slot.
 - Do this in config mode (badge awake); each DATA resets the awake window so it won't sleep mid‑update.
+
+### Recovery, rollback & boot diagnostics
+
+Two gotchas can make an OTA *look* like it bricked the badge — both are about the **other** slot,
+not the new image:
+
+- **Rollback needs a trailered image in the other slot.** Auto‑revert can only fall back to a slot
+  whose CRC trailer verifies. An app `load`ed by a debugger (VS Code **F5** / `gdb load`) has **no
+  trailer**, so it is *not* a valid revert target. To have a real fallback, SWD‑flash a trailered
+  `slotA.bin` instead — e.g. `probe-rs download --binary-format bin --base-address 0xE000 build/slotA.bin`
+  — not F5. (If no slot is a valid revert target, the bootloader now **trial‑boots the only
+  CRC‑valid image it can find** rather than halting — a slow retry beats a dead board.)
+- **Detach the debugger before triggering OTA.** While a probe is attached the bootloader takes its
+  dev path and boots **slot A** (the old image) regardless of `bl_state`, so a freshly‑OTA'd slot B
+  silently won't run; and `sys_reboot()` under a halted/attached probe may not actually reset. Close
+  the debug session first, then OTA.
+
+**On‑screen boot diagnostics.** The board has no usable serial, so on a **trial boot**, a **revert**,
+or a **halt** the bootloader draws a diagnostic screen on the ePaper before chain‑loading: the boot
+decision (`TRIAL SLOT B` / `REVERT TO A` / `HALT NO BOOTABLE IMG`) and, per slot A/B, `VALID`,
+live `CRC OK/FAIL`, `VER`, `LEN`, `ATT` (trial count) and `CONF`/`UNCONF`. A normal confirmed boot
+is **not** slowed by this (no extra refresh). If a badge sticks after an update, read this screen to
+see which slot was chosen and why.
 
 Upload sequence (JS):
 ```js

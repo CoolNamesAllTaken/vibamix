@@ -104,6 +104,14 @@ Then in [`badgectl`](badgectl/README.md): wake + connect to the badge and run th
 verifies it, reboots into it as a trial, and the app confirms it. Wire format: see
 [`docs/ble-config-api.md`](vibamix_zephyr/docs/ble-config-api.md) §10.
 
+> **Two OTA gotchas** (see §10 "Recovery, rollback & boot diagnostics"):
+> 1. **Detach the debugger before OTA.** With a probe attached the BL boots slot A (the old image)
+>    no matter what, so the new slot silently won't run.
+> 2. **Auto‑revert needs a trailered fallback.** An **F5**‑loaded app has no CRC trailer, so it's not
+>    a valid rollback target. SWD‑flash the trailered `build/slotA.bin` (step **b**), not F5, if you
+>    want a real revert target. On a trial/revert/halt the BL now draws a **diagnostic screen** on the
+>    ePaper (chosen slot + per‑slot valid/CRC/version/attempts) — read it if a badge sticks post‑update.
+
 ## Notes
 
 - **`--no-sysbuild` is mandatory** for both images (direct-XIP linking from the DTS partitions).

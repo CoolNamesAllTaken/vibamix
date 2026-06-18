@@ -28,6 +28,7 @@
 #include <zephyr/sys/util.h>
 
 #include "bl_state.h"
+#include "diag.h"
 #include "vbx_img.h"
 
 #define SLOT_A_OFF  DT_REG_ADDR(DT_NODELABEL(slot_a_partition))
@@ -132,11 +133,44 @@ static void boot_slot(int slot)
 /* Arm wdt31 so a hung trial boot resets the SoC (-> revert). It keeps running
  * across the jump; the app feeds it after a healthy boot, and it pauses itself
  * in System OFF (WDT_OPT_PAUSE_IN_SLEEP). */
+/* Gather the boot facts (live CRC, version, bl_state fields) for the on-ePaper
+ * diagnostic screen. Live-verifies each slot's trailer so the panel shows the
+ * real CRC pass/fail, independent of what bl_state claims. */
+static void build_diag(struct bl_diag *d, const struct bl_state_rec *rec, bool have,
+		       int choice, bool trial, const char *reason)
+{
+	memset(d, 0, sizeof(*d));
+	d->have_state = have;
+	d->seq = have ? rec->seq : 0;
+	d->chosen = choice;
+	d->trial = trial;
+	d->reason = reason;
+
+	for (int s = 0; s < BL_NUM_SLOTS; s++) {
+		const struct bl_slot_meta *m = &rec->slot[s];
+		uint32_t ver = 0;
+		bool crc = false;
+
+		if (have && m->image_len >= VBX_IMG_TRAILER_SIZE) {
+			crc = vbx_img_verify(slot_base(s), m->image_len, &ver);
+		}
+		d->slot[s].valid = have && m->valid;
+		d->slot[s].crc_ok = crc;
+		d->slot[s].confirmed = have && m->confirmed;
+		d->slot[s].attempts = have ? m->attempts : 0;
+		d->slot[s].version = crc ? ver : (have ? m->version : 0);
+		d->slot[s].image_len = have ? m->image_len : 0;
+	}
+}
+
 static void arm_watchdog(void)
 {
 	const struct device *wdt = DEVICE_DT_GET(DT_ALIAS(watchdog0));
 	struct wdt_timeout_cfg cfg = {
-		.window = { .min = 0U, .max = 8000U },
+		/* Generous: a healthy image confirms in a few seconds, but worst-case
+		 * boot-to-confirm (ePaper HW init + bt_enable + mesh/settings) can exceed
+		 * 8 s, which used to burn the trial and (with no revert target) brick. */
+		.window = { .min = 0U, .max = 30000U },
 		.callback = NULL,
 		.flags = WDT_FLAG_RESET_SOC,
 	};
@@ -216,10 +250,70 @@ int main(void)
 	}
 
 	if (choice < 0) {
+		/* Last resort before bricking: scan BOTH slots for any CRC-valid image
+		 * and trial-boot the highest-version one. This rescues the common OTA
+		 * case (good new image, no trailered revert target) — better a slow
+		 * retry loop than a dead board. */
+		int ls = -1;
+		uint32_t ls_ver = 0, ls_len = 0;
+
+		for (int s = 0; s < BL_NUM_SLOTS; s++) {
+			uint32_t ver = 0;
+			uint32_t len = scan_trailer(s, &ver);
+
+			if (len && (ls < 0 || ver >= ls_ver)) {
+				ls = s;
+				ls_ver = ver;
+				ls_len = len;
+			}
+		}
+		if (ls >= 0) {
+			printk("bl: last-resort trial boot of slot %d (v%u, %u B)\n",
+			       ls, (unsigned)ls_ver, (unsigned)ls_len);
+			bl_state_set_pending(ls, ls_ver, ls_len);
+			choice = ls;
+			choice_trial = true;
+		}
+	}
+
+	/* Re-read so the diagnostic screen reflects any set_pending above. */
+	have = (bl_state_read(&rec) == 0);
+
+	if (choice < 0) {
+		struct bl_diag d;
+
+		build_diag(&d, &rec, have, -1, false, "HALT NO BOOTABLE IMG");
+		bl_diag_show(&d);
 		printk("bl: no bootable image; halting\n");
 		for (;;) {
 			k_msleep(1000);
 		}
+	}
+
+	/* A revert = we picked a confirmed slot while the other slot is a valid but
+	 * unconfirmed image (a failed trial we just rolled back from). Draw the diag
+	 * on trials, reverts, and halts — but not on a plain healthy boot, so normal
+	 * boots aren't slowed by the ~2-4 s ePaper refresh. */
+	int other = choice ^ 1;
+	bool revert = !choice_trial && have && rec.slot[other].valid &&
+		      !rec.slot[other].confirmed;
+
+	if (choice_trial || revert) {
+		static char reason[24];
+		struct bl_diag d;
+
+		if (choice_trial) {
+			strcpy(reason, "TRIAL BOOT");
+		} else {
+			strcpy(reason, "REVERT TO ");
+			size_t l = strlen(reason);
+
+			reason[l] = (char)('A' + choice);
+			reason[l + 1] = '\0';
+		}
+		build_diag(&d, &rec, have, choice, choice_trial, reason);
+		/* Before arm_watchdog(): the refresh must not eat the trial's budget. */
+		bl_diag_show(&d);
 	}
 
 	if (choice_trial) {

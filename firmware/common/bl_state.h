@@ -20,7 +20,7 @@ extern "C" {
 #define BL_SLOT_A      0
 #define BL_SLOT_B      1
 #define BL_NUM_SLOTS   2
-#define BL_MAX_ATTEMPTS 1 /* trial boots allowed before an unconfirmed image is dropped */
+#define BL_MAX_ATTEMPTS 3 /* trial boots allowed before an unconfirmed image is dropped */
 
 struct __packed bl_slot_meta {
 	uint32_t image_len;  /* image size (locates the trailer); 0 = none */
