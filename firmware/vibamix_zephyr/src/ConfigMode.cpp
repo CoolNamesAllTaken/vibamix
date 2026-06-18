@@ -413,6 +413,12 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
     uint8_t ka_seq = 0;
     bool    ka_blink = false;
     int     ka_tick = 0;
+    // True once the currently-shown content frame has been (re)established as the
+    // partial-refresh base while the panel is awake — so the keepalive dot can be
+    // partial-refreshed over it. Invalidated whenever a content frame is rendered
+    // (those paths sleep the panel, leaving the base stale).
+    bool    content_based = false;
+    bool    prev_content_shown = false;
 
     // Per-frame LEDs: light the strip only while a content frame is on the panel
     // (mirror s_content_shown). The strip was powered down before config mode, so
@@ -442,12 +448,22 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
             const struct pending_img p = s_pimg[idx];
             mesh->on_image(p.slot, p.fmt, s_render_buf[idx], p.len, p.w, p.h);
             s_rendering_buf = -1;
+            content_based = false;   // new frame on the panel; re-base before partial refresh
             note_activity();
         }
         if (atomic_cas(&s_display_pending, 1, 0)) {
             mesh->on_display_screen(s_pd_kind, s_pd_idx);
+            content_based = false;   // new frame on the panel; re-base before partial refresh
             note_activity();
         }
+
+        // A content frame just took over the panel (e.g. a name push, which sets the
+        // flag on the BT thread without queuing a deferred render): re-base it before
+        // the keepalive dot can be partial-refreshed over it.
+        if (s_content_shown && !prev_content_shown) {
+            content_based = false;
+        }
+        prev_content_shown = s_content_shown;
 
         const bool connected = atomic_get(&s_conn_count) > 0;
 
@@ -502,6 +518,26 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
                     config_screen_connected(*gui, cfg->name,
                                             cfg->has_attendee ? cfg->attendee_id : "",
                                             batt_mv, batt_pct, app_alive, ka_blink);
+                    if (++ka_tick % kFullRefreshEvery == 0) {
+                        gui->set_base_map();
+                    } else {
+                        gui->refresh_partial();
+                    }
+                } else if (!content_based) {
+                    // A content frame owns the panel and the render left it asleep
+                    // with a stale partial base. Re-establish it once (wake + full
+                    // refresh) with the gateway banner composited on top, so the
+                    // keepalive dot can then be partial-refreshed over the frame.
+                    gui->wake();
+                    gateway_status_overlay(gui->framebuffer());
+                    gui->set_base_map();
+                    content_based = true;
+                    ka_tick = 0;
+                } else {
+                    // Keep the keepalive dot blinking over the shown frame: re-composite
+                    // the banner + flash-free partial refresh (periodic full refresh
+                    // clears ghosting).
+                    gateway_status_overlay(gui->framebuffer());
                     if (++ka_tick % kFullRefreshEvery == 0) {
                         gui->set_base_map();
                     } else {

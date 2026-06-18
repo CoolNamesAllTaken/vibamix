@@ -362,6 +362,58 @@ void identity_status_screen_draw(GUI &gui, const char *name, const char *table,
     draw_identity_body(name, table, nullptr, 0, 0, 0, 42);
 }
 
+// 8 unit vectors (cos, sin) x1024 at 45-degree steps, for placing gear teeth
+// around the body without pulling in math.h / floating point.
+static const int kDir8[8][2] = {
+    { 1024, 0 }, { 724, 724 }, { 0, 1024 }, { -724, 724 },
+    { -1024, 0 }, { -724, -724 }, { 0, -1024 }, { 724, -724 },
+};
+
+// A chunky "settings" gear centered at (cx, cy): a filled body circle, eight
+// square teeth poking out to r_outer, and a punched-out white center hole.
+static void draw_gear(int cx, int cy, int r_outer, int hole_r)
+{
+    const int ht = r_outer / 4;          // tooth half-size
+    const int r_body = r_outer - ht;     // teeth reach out to ~r_outer
+
+    Paint_DrawCircle(cx, cy, r_body, BLACK, DRAW_FILL_FULL, DOT_PIXEL_1X1);
+    for (int i = 0; i < 8; i++) {
+        const int tx = cx + r_body * kDir8[i][0] / 1024;
+        const int ty = cy + r_body * kDir8[i][1] / 1024;
+        fill_rect(tx - ht, ty - ht, tx + ht, ty + ht);
+    }
+    Paint_DrawCircle(cx, cy, hole_r, WHITE, DRAW_FILL_FULL, DOT_PIXEL_1X1);
+}
+
+// The Bluetooth rune in `color`, centered at (cx, cy): a vertical spine, top/
+// bottom strokes to the right peaks, and the two long crossing diagonals — the
+// bind rune that reads as the Bluetooth glyph. `half_h` is half the rune height.
+static void draw_bt_glyph(int cx, int cy, int half_h, int color)
+{
+    const int d = half_h / 2;            // half width
+    const int q = half_h / 2;            // peak y-offset from center
+    const int ax = cx, ay0 = cy - half_h, ay1 = cy + half_h;   // spine ends
+    const int prx = cx + d;              // right peaks x
+    const int plx = cx - d;              // left ends x
+    const int py0 = cy - q, py1 = cy + q;
+
+    Paint_DrawLine(ax, ay0, ax, ay1, color, LINE_STYLE_SOLID, DOT_PIXEL_1X1); // spine
+    Paint_DrawLine(ax, ay0, prx, py0, color, LINE_STYLE_SOLID, DOT_PIXEL_1X1); // top->UR
+    Paint_DrawLine(ax, ay1, prx, py1, color, LINE_STYLE_SOLID, DOT_PIXEL_1X1); // bot->LR
+    Paint_DrawLine(prx, py0, plx, py1, color, LINE_STYLE_SOLID, DOT_PIXEL_1X1); // UR->LL
+    Paint_DrawLine(prx, py1, plx, py0, color, LINE_STYLE_SOLID, DOT_PIXEL_1X1); // LR->UL
+}
+
+// Small Bluetooth "connected" badge: a filled black disc with the rune in white,
+// tucked over the gear's lower-right to read as config + connected. A white halo
+// ring separates the disc from the (also black) gear body it sits on.
+static void draw_bt_badge(int cx, int cy, int r)
+{
+    Paint_DrawCircle(cx, cy, r + 2, WHITE, DRAW_FILL_FULL, DOT_PIXEL_1X1);
+    Paint_DrawCircle(cx, cy, r, BLACK, DRAW_FILL_FULL, DOT_PIXEL_1X1);
+    draw_bt_glyph(cx, cy, r * 3 / 5, WHITE);
+}
+
 void config_screen_connected(GUI &gui, const char *name, const char *table,
                              int batt_mv, int batt_pct, bool app_alive, bool blink)
 {
@@ -370,7 +422,7 @@ void config_screen_connected(GUI &gui, const char *name, const char *table,
     Paint_NewImage(fb, EPD_WIDTH, EPD_HEIGHT, ROTATE_270, WHITE);
     Paint_Clear(WHITE);
 
-    // Status bar: battery (left) + "Connected" (right), divider — no countdown.
+    // Top status bar: battery (left), keepalive pulse dot (right), divider.
     char pc[20];
     const int icon_end = draw_battery_icon(kMargin, 4, batt_mv >= 0 ? batt_pct : 0);
     if (batt_mv >= 0) {
@@ -380,38 +432,51 @@ void config_screen_connected(GUI &gui, const char *name, const char *table,
         snprintf(pc, sizeof(pc), "-- %%");
     }
     Paint_DrawString_P(icon_end + 3, 1, pc, &PoppinsMd16, WHITE, BLACK);
-    const char *lbl = "Connected";
-    const int lw = Paint_StringWidth_P(lbl, &PoppinsMd16);
-    Paint_DrawString_P(kCanvasW - kMargin - lw, 1, lbl, &PoppinsMd16, WHITE, BLACK);
 
-    // Keepalive dot left of the label: pulses solid/hollow each second while the
-    // laptop's keepalive writes keep arriving; stays hollow (no pulse) if stale.
-    const int dx1 = kCanvasW - kMargin - lw - 6;
+    // Keepalive dot (top-right): pulses solid/hollow each second while the app's
+    // keepalive writes keep arriving; stays hollow (no pulse) if stale.
+    const int dx1 = kCanvasW - kMargin;
     const int dx0 = dx1 - 8;
     if (app_alive && blink) {
-        fill_rect(dx0, 5, dx1, 13);   // centered on the status row (y9)
+        fill_rect(dx0, 5, dx1, 13);
     } else {
         draw_rect(dx0, 5, dx1, 13);
     }
 
     fill_rect(kMargin, 24, kCanvasW - kMargin, 24);
 
-    // Body.
-    Paint_DrawString_P(kMargin, 48, "Connected", &PoppinsSB24, WHITE, BLACK);
+    // Left: large config gear with a Bluetooth "connected" badge at its corner.
+    const int gx = 52, gy = 90, gr = 34;
+    draw_gear(gx, gy, gr, gr / 3);
+    draw_bt_badge(gx + 24, gy + 24, 14);
+
+    // Right column: heading + name + what-to-do / how-to-exit instructions.
+    const int rx = 104;
+    const int rmaxW = kCanvasW - kMargin - rx;
+    Paint_DrawString_P(rx, 32, "Connected", &PoppinsSB24, WHITE, BLACK);
+    int ry = 70;
+    if (name && name[0]) {
+        Paint_DrawString_P(rx, ry, name, &PoppinsMd20, WHITE, BLACK);
+        ry += PoppinsMd20.Height + 6;
+    }
     if (gateway_status_count() > 0) {
         // Acting as a mesh gateway: show the last command relayed to the fleet.
         char bc[48];
         snprintf(bc, sizeof(bc), "Broadcast: %s  x%u",
                  gateway_status_label(), (unsigned)gateway_status_count());
-        Paint_DrawString_P(kMargin, 80, bc, &PoppinsMd16, WHITE, BLACK);
+        draw_wrapped(rx, ry, rmaxW, bc, &PoppinsMd16);
     } else {
-        Paint_DrawString_P(kMargin, 80, "Editing your badge...",
-                           &PoppinsMd16, WHITE, BLACK);
+        draw_wrapped(rx, ry, rmaxW,
+                     "Edit your name, facts & image from the vibamix app.",
+                     &PoppinsMd16);
     }
-    if (name && name[0]) {
-        Paint_DrawString_P(kMargin, 110, name, &PoppinsMd20, WHITE, BLACK);
-    }
-    if (table && table[0]) {
-        Paint_DrawString_P(kMargin, 138, table, &PoppinsMd16, WHITE, BLACK);
-    }
+
+    // Bottom bar: an inverted strip with the exit instruction, so it's unmissable.
+    const int bar_h = 24;
+    const int by0 = kCanvasH - bar_h;
+    fill_rect(0, by0, kCanvasW - 1, kCanvasH - 1);
+    const char *exit_lbl = "Press the button to exit";
+    const int ew = Paint_StringWidth_P(exit_lbl, &PoppinsMd16);
+    Paint_DrawString_P((kCanvasW - ew) / 2, by0 + 4, exit_lbl,
+                       &PoppinsMd16, BLACK, WHITE);
 }

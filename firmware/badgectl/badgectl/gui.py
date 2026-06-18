@@ -791,20 +791,28 @@ class MainWindow(QMainWindow):
         label.setPixmap(pm)
 
     async def _load_identity_pixels(self) -> None:
-        ident = await self.link.read_identity(want_pixels=True)
+        self.g_idimg_prog.setValue(0)
+        ident = await self.link.read_identity(
+            want_pixels=True,
+            on_progress=lambda d, n: self.g_idimg_prog.setValue(int(d * 100 / n)))
         img = ident["image"]
         if img["present"] and img.get("pixels"):
             self._show_preview(self.g_idimg_preview, img["fmt"], img["pixels"])
             self._log(f"Loaded identity image ({img['w']}x{img['h']}).")
         else:
+            self.g_idimg_prog.setValue(0)
             self._log("No identity image stored.")
 
     async def _load_image_pixels(self, slot: int) -> None:
-        im = await self.link.read_image_frame(slot, want_pixels=True)
+        self.g_slot_prog.setValue(0)
+        im = await self.link.read_image_frame(
+            slot, want_pixels=True,
+            on_progress=lambda d, n: self.g_slot_prog.setValue(int(d * 100 / n)))
         if im["present"] and im.get("pixels"):
             self._show_preview(self.g_slot_preview, im["fmt"], im["pixels"])
             self._log(f"Loaded image frame {slot} ({im['w']}x{im['h']}).")
         else:
+            self.g_slot_prog.setValue(0)
             self._log(f"Image frame {slot} is empty.")
 
     # ---------- Mesh tab ----------

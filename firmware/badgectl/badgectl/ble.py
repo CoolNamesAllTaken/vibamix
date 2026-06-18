@@ -171,16 +171,21 @@ class BadgeLink:
         assert self.client is not None
         await self.client.write_gatt_char(uuid, data, response=response)
 
-    async def _read_serialized(self, uuid: str) -> bytes:
+    async def _read_serialized(self, uuid: str, on_progress=None, total_fn=None) -> bytes:
         """Read a SELECT-serialized frame in <=MTU windows.
 
         macOS/CoreBluetooth caps a single characteristic read at 512 B, but a
         serialized image frame is multi-KB. The badge exposes an app-level read
         window (GOP_READ_AT): we move the base, read a chunk, and repeat until a
-        read past the end returns nothing. Call after the SELECT write."""
+        read past the end returns nothing. Call after the SELECT write.
+
+        Progress: the total length isn't known up front, so `total_fn(buf)` derives
+        the expected full size once enough header bytes have arrived (else None);
+        `on_progress(done, total)` then mirrors the upload convention."""
         assert self.client is not None
         out = bytearray()
         off = 0
+        total = None
         while True:
             await self._w(uuid, bytes([keys.GOP_READ_AT]) + _le16(off))
             chunk = await self.client.read_gatt_char(uuid)
@@ -188,6 +193,12 @@ class BadgeLink:
                 break
             out += chunk
             off += len(chunk)
+            if total is None and total_fn is not None:
+                total = total_fn(out)
+            if on_progress and total:
+                on_progress(min(len(out), total), total)
+        if on_progress and total:
+            on_progress(total, total)
         return bytes(out)
 
     # --- direct GATT config: one read/write characteristic per frame type ---
@@ -225,10 +236,27 @@ class BadgeLink:
                  + _le16(len(payload)) + _le16(264) + _le16(176))
         await self._upload(keys.UUID_IDENTITY, start, payload, crc, on_progress)
 
-    async def read_identity(self, want_pixels: bool = False) -> dict:
+    async def read_identity(self, want_pixels: bool = False, on_progress=None) -> dict:
         assert self.client is not None
         await self._w(keys.UUID_IDENTITY, bytes([keys.GOP_SELECT, 1 if want_pixels else 0]))
-        v = await self._read_serialized(keys.UUID_IDENTITY)
+
+        def _total(b: bytes):
+            try:
+                o = 0
+                o += 1 + b[o]          # namelen + name
+                o += 1 + b[o]          # idlen + id
+                o += 4                 # led (anim,r,g,b)
+                o += 1 + 1 + 2 + 2     # present, fmt, w, h
+                if o + 2 > len(b):
+                    return None
+                ln = int.from_bytes(b[o:o + 2], "little")
+                o += 2
+                return o + ln
+            except IndexError:
+                return None
+
+        v = await self._read_serialized(keys.UUID_IDENTITY,
+                                        on_progress=on_progress, total_fn=_total)
         o = 0
         name, o = _get_str(v, o)
         attendee, o = _get_str(v, o)
@@ -293,10 +321,15 @@ class BadgeLink:
         """Update only an image frame's LED (no image resend)."""
         await self._w(keys.UUID_IMAGE_FRAME, bytes([keys.GOP_META, slot, anim, r, g, b]))
 
-    async def read_image_frame(self, slot: int, want_pixels: bool = False) -> dict:
+    async def read_image_frame(self, slot: int, want_pixels: bool = False,
+                               on_progress=None) -> dict:
         assert self.client is not None
         await self._w(keys.UUID_IMAGE_FRAME, bytes([keys.GOP_SELECT, slot, 1 if want_pixels else 0]))
-        v = await self._read_serialized(keys.UUID_IMAGE_FRAME)
+        # 14-byte header (present,slot,led(4),present,fmt,w(2),h(2),len(2)) then pixels.
+        total_fn = (lambda b: (14 + int.from_bytes(b[12:14], "little"))
+                    if len(b) >= 14 else None)
+        v = await self._read_serialized(keys.UUID_IMAGE_FRAME,
+                                        on_progress=on_progress, total_fn=total_fn)
         # Layout: present, slot, anim,r,g,b, then put_image() block which leads with
         # its own (duplicate) present byte at v[6] before fmt — hence the +1 offsets.
         present = bool(v[0])
