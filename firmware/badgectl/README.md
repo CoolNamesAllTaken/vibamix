@@ -29,6 +29,10 @@ addresses, so badges are listed by their advertised name `vibamix-XXXX`.)
    text. **Stored content (name, table ID, stored frames, display selection) is GATT-only** — set it
    per badge over the Direct tab.
 
+5. **Flash** tab — bulk-flashes firmware to attached badges over **SWD** (probe-rs), independent of
+   BLE. Flashes the bootloader + a *bootable* app to **every plugged-in probe at once** and assigns
+   each a unique factory id. See **Flashing firmware (SWD)** below.
+
 ### Important: how laptop "mesh" works
 
 A laptop has no mesh radio. The tool connects over GATT to a **config-mode** badge and writes a
@@ -38,6 +42,35 @@ GATT Proxy anymore — a badge is connectable only in config mode.) That badge i
 a broadcast only reaches **other badges that are also awake**. Use the **Auto heartbeat** toggle to
 hold a fleet of (already-woken) badges awake. A heartbeat can **not** wake a sleeping badge — its
 radio is off in deep sleep.
+
+## Flashing firmware (SWD)
+
+The **Flash** tab folds in the core of the standalone `firmware/flashtool` — it programs a fleet of
+badges over their on-module CMSIS-DAP probes — without that tool's USB-hub port mapping. It flashes
+**every connected probe in parallel**; there is no per-port slot map.
+
+Prerequisite: install **probe-rs** separately (`cargo install probe-rs-tools`, or a pre-built binary
+on `PATH`).
+
+1. **Build the images first** (the tab points at pre-built artifacts):
+   ```sh
+   cd firmware/vibamix_zephyr && bash scripts/build_slots.sh
+   ```
+   This produces `build/slotA.bin` (the **trailered**, cold-bootable app) and
+   `build/bl/zephyr/zephyr.hex` (the bootloader) — the Flash tab's two default paths.
+2. Plug in the badges (each XIAO exposes a CMSIS-DAP probe). They appear in the **Flash** tab's probe
+   table (auto-refreshed); hit **Refresh probes** to rescan now.
+3. Confirm the two image paths (override via **Browse**), leave **Write per-unit factory id** on, and
+   press **Flash all**. Each probe flashes concurrently: bootloader → app (slot A, `0xE000`) →
+   factory id → reset. Per-probe progress shows in the table; the board boots the app standalone.
+
+The app **must** be the trailered `slotA.bin`, not a plain `zephyr.hex`: the direct-XIP bootloader
+CRC-verifies the slot via its 32-byte `VIMG` trailer before booting, so an un-trailered app only runs
+under an attached debugger.
+
+**Factory ids** are unique 15-bit values (mesh unicast / config code / GAP name) assigned per probe
+serial and persisted to `~/.badgectl/serials.json`. **Back that file up** — losing it restarts ids at
+1 and risks duplicates on already-flashed badges.
 
 ## Notes
 
@@ -58,4 +91,8 @@ radio is off in deep sleep.
 | `badgectl/ble.py` | bleak scan + one connection (GATT framing + proxy write). |
 | `badgectl/imageconv.py` | Pillow → 1-bit framebuffer / 2-bit grayscale packing. |
 | `badgectl/seqstore.py` | Persisted mesh sequence number. |
-| `badgectl/gui.py` | PyQt6 window (GATT + Mesh panels, log console). |
+| `badgectl/probes.py` | Enumerate attached CMSIS-DAP probes via `probe-rs list`. |
+| `badgectl/flash.py` | probe-rs flashing backend (bootloader + app + factory id). |
+| `badgectl/serialreg.py` | Per-unit factory-id assignment + persistence. |
+| `badgectl/flashconfig.py` | Flash constants + default artifact paths. |
+| `badgectl/gui.py` | PyQt6 window (GATT + Mesh + Batch + Flash panels, log console). |

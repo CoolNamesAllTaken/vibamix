@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from PyQt6.QtCore import QSortFilterProxyModel, Qt, QTimer
+from PyQt6.QtCore import QSortFilterProxyModel, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -30,6 +32,8 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QTableView,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -37,7 +41,7 @@ from PyQt6.QtWidgets import (
 
 from bleak.exc import BleakDeviceNotFoundError
 
-from . import imageconv, keys
+from . import flash, flashconfig, imageconv, keys, probes, serialreg
 from .ble import BadgeLink, Found, Scanner
 from .devices import COL_CHECK, COL_NAME, DeviceModel
 from .mesh import MeshCrypto, MeshSession
@@ -83,6 +87,11 @@ def pil_to_pixmap(pil_img) -> QPixmap:
 
 
 class MainWindow(QMainWindow):
+    # Emitted from the flash worker threads; delivered (queued) on the Qt thread.
+    flash_progress = pyqtSignal(str, float, str)   # probe label, percent, phase
+    flash_result = pyqtSignal(str, bool, str)      # probe label, ok, message
+    flash_finished = pyqtSignal(int, int)          # ok count, total
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("badgectl — vibamix")
@@ -112,6 +121,12 @@ class MainWindow(QMainWindow):
         self._last_link = 0.0   # last successful GATT round-trip (any direction) — link health
         self._batch_running = False
         self._batch_cancel = False
+
+        # flash (SWD bulk-flash) state
+        self._flash_running = False
+        self._fl_probes: list[probes.Probe] = []
+        self._fl_rows: dict[str, int] = {}      # probe label -> table row
+        self._fl_status: dict[str, str] = {}    # probe label -> last status text
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -254,6 +269,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_gatt_tab(), "Direct (GATT)")
         tabs.addTab(self._build_mesh_tab(), "Mesh")
         tabs.addTab(self._build_batch_tab(), "Batch")
+        tabs.addTab(self._build_flash_tab(), "Flash")
         v.addWidget(tabs, 1)
         return w
 
@@ -976,6 +992,181 @@ class MainWindow(QMainWindow):
         v.addWidget(g)
         v.addStretch()
         return w
+
+    # ---------- Flash tab (SWD bulk-flash over probe-rs) ----------
+    def _build_flash_tab(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        info = QLabel(
+            "Flash the bootloader + a bootable app to EVERY attached probe over "
+            "SWD (probe-rs), in parallel. Build the images first with "
+            "vibamix_zephyr/scripts/build_slots.sh — the app must be the trailered "
+            "slotA.bin so the bootloader's CRC check passes and the board boots "
+            "standalone. Independent of the BLE connection above.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#9aa4b2;")
+        v.addWidget(info)
+
+        g = QGroupBox("Firmware images")
+        gl = QGridLayout(g)
+        self.fl_bl_path = QLineEdit(str(flashconfig.DEFAULT_BOOTLOADER_HEX))
+        bl_browse = QPushButton("Browse")
+        bl_browse.setObjectName("ghost")
+        bl_browse.clicked.connect(
+            lambda: self._browse_into(self.fl_bl_path, "Bootloader .hex", "HEX (*.hex)"))
+        self.fl_app_path = QLineEdit(str(flashconfig.DEFAULT_APP_BIN))
+        app_browse = QPushButton("Browse")
+        app_browse.setObjectName("ghost")
+        app_browse.clicked.connect(
+            lambda: self._browse_into(self.fl_app_path, "App slotA.bin", "BIN (*.bin)"))
+        self.fl_factory = QCheckBox("Write per-unit factory id (mesh unicast / config code)")
+        self.fl_factory.setChecked(True)
+        gl.addWidget(QLabel("Bootloader (.hex → 0x0)"), 0, 0)
+        gl.addWidget(self.fl_bl_path, 0, 1)
+        gl.addWidget(bl_browse, 0, 2)
+        gl.addWidget(QLabel("App slot A (.bin → 0xE000)"), 1, 0)
+        gl.addWidget(self.fl_app_path, 1, 1)
+        gl.addWidget(app_browse, 1, 2)
+        gl.addWidget(self.fl_factory, 2, 0, 1, 3)
+        v.addWidget(g)
+
+        self.fl_table = QTableWidget(0, 3)
+        self.fl_table.setHorizontalHeaderLabels(["Serial", "Probe", "Status"])
+        self.fl_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.fl_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.fl_table.verticalHeader().setVisible(False)
+        fhdr = self.fl_table.horizontalHeader()
+        fhdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        v.addWidget(self.fl_table, 1)
+
+        row = QHBoxLayout()
+        self.fl_refresh = QPushButton("Refresh probes")
+        self.fl_refresh.setObjectName("ghost")
+        self.fl_refresh.clicked.connect(self._refresh_probes)
+        self.fl_flash = QPushButton("Flash all")
+        self.fl_flash.clicked.connect(self._flash_all)
+        row.addWidget(self.fl_refresh)
+        row.addStretch()
+        row.addWidget(self.fl_flash)
+        v.addLayout(row)
+
+        self.flash_progress.connect(self._on_flash_progress)
+        self.flash_result.connect(self._on_flash_result)
+        self.flash_finished.connect(self._on_flash_finished)
+
+        self._fl_timer = QTimer(self)   # poll for plugged/unplugged probes
+        self._fl_timer.setInterval(2_000)
+        self._fl_timer.timeout.connect(self._refresh_probes)
+        self._fl_timer.start()
+        # Defer the first scan to the event loop: this tab is built during
+        # __init__ before self.log exists, and _refresh_probes may log.
+        QTimer.singleShot(0, self._refresh_probes)
+        return w
+
+    def _browse_into(self, edit: QLineEdit, title: str, filt: str) -> None:
+        fn, _ = QFileDialog.getOpenFileName(self, title, edit.text() or "", filt)
+        if fn:
+            edit.setText(fn)
+
+    def _set_probe_status(self, label: str, text: str) -> None:
+        self._fl_status[label] = text
+        row = self._fl_rows.get(label)
+        if row is None or row >= self.fl_table.rowCount():
+            return
+        item = self.fl_table.item(row, 2)
+        if item is None:
+            item = QTableWidgetItem()
+            self.fl_table.setItem(row, 2, item)
+        item.setText(text)
+
+    def _refresh_probes(self) -> None:
+        if self._flash_running:
+            return  # don't disturb the table mid-run (probes re-enumerate on reset)
+        try:
+            found = probes.list_probes()
+        except RuntimeError as e:
+            self._fl_timer.stop()   # probe-rs missing/broken — stop hammering it
+            self._log(f"probe list: {e}")
+            self.fl_flash.setEnabled(False)
+            return
+        self._fl_probes = found
+        self._fl_rows = {}
+        self.fl_table.setRowCount(len(found))
+        for i, p in enumerate(found):
+            self._fl_rows[p.label] = i
+            self.fl_table.setItem(i, 0, QTableWidgetItem(p.serial or "—"))
+            self.fl_table.setItem(i, 1, QTableWidgetItem(p.name))
+            self.fl_table.setItem(i, 2, QTableWidgetItem(self._fl_status.get(p.label, "idle")))
+        self.fl_flash.setEnabled(bool(found))
+
+    def _flash_all(self) -> None:
+        if self._flash_running:
+            return
+        bl = self.fl_bl_path.text().strip()
+        app = self.fl_app_path.text().strip()
+        for what, path in (("bootloader", bl), ("app", app)):
+            if not path or not Path(path).is_file():
+                self._log(f"Flash: {what} image not found — {path or '(empty)'}")
+                return
+        targets = list(self._fl_probes)
+        if not targets:
+            self._log("Flash: no probes detected.")
+            return
+        images = [
+            flash.Image(bl, "hex", "bootloader"),
+            flash.Image(app, "bin", "app", flashconfig.APP_SLOT_A_ADDR),
+        ]
+        want_factory = self.fl_factory.isChecked()
+
+        self._flash_running = True
+        self._fl_timer.stop()
+        self.fl_flash.setEnabled(False)
+        self.fl_refresh.setEnabled(False)
+        for p in targets:
+            self._set_probe_status(p.label, "queued")
+        self._log(f"Flashing {len(targets)} probe(s) … "
+                  f"factory id {'ON' if want_factory else 'off'}.")
+
+        t = threading.Thread(
+            target=self._flash_worker, args=(targets, images, want_factory), daemon=True)
+        t.start()
+
+    def _flash_worker(self, targets, images, want_factory: bool) -> None:
+        """Runs off the Qt thread: one probe-rs flash per probe, bounded pool."""
+        def one(p: probes.Probe) -> bool:
+            try:
+                fid = serialreg.assign_for(p.serial) if want_factory else None
+            except RuntimeError as e:
+                self.flash_result.emit(p.label, False, str(e))
+                return False
+            ok, msg = flash.flash_device(
+                p.selector, images,
+                lambda pct, phase: self.flash_progress.emit(p.label, pct, phase),
+                fid)
+            detail = msg if not ok else (f"id 0x{fid:04x}" if fid is not None else "ok")
+            self.flash_result.emit(p.label, ok, detail)
+            return ok
+
+        ok_count = 0
+        try:
+            with ThreadPoolExecutor(max_workers=flashconfig.MAX_CONCURRENT) as ex:
+                ok_count = sum(1 for r in ex.map(one, targets) if r)
+        finally:
+            self.flash_finished.emit(ok_count, len(targets))
+
+    def _on_flash_progress(self, label: str, pct: float, phase: str) -> None:
+        self._set_probe_status(label, f"{phase} {pct:.0f}%")
+
+    def _on_flash_result(self, label: str, ok: bool, msg: str) -> None:
+        self._set_probe_status(label, f"done ({msg})" if ok else f"FAILED: {msg}")
+        self._log(f"flash {label}: {'ok — ' + msg if ok else 'FAILED — ' + msg}")
+
+    def _on_flash_finished(self, ok: int, total: int) -> None:
+        self._flash_running = False
+        self.fl_refresh.setEnabled(True)
+        self.fl_flash.setEnabled(True)
+        self._fl_timer.start()
+        self._log(f"Flash complete: {ok}/{total} ok.")
 
     def _cancel_batch(self) -> None:
         self._batch_cancel = True
