@@ -12,18 +12,22 @@ How the pieces map onto Bluetooth Mesh:
 
 - **Managed-flooding relay** — a message injected at one badge is rebroadcast across the whole
   mesh (`CONFIG_BT_MESH_RELAY`).
-- **GATT Proxy ingress** — a phone/laptop BLE central connects to the nearest badge over the
-  Mesh Proxy GATT service and injects messages (`CONFIG_BT_MESH_GATT_PROXY` + `PB_GATT`).
+- **Config-mode mesh ingress** — there is **no SIG Mesh GATT Proxy / PB-GATT** (deliberately
+  disabled). A phone/laptop instead connects to a **config-mode** badge over the custom config
+  service and writes a vendor-model access payload to the **mesh-TX gateway** characteristic
+  (`f0de000C`); that badge re-originates it onto the mesh. Badges are connectable only in config
+  mode (button), never via an always-on proxy advert.
 - **Addressing** — send to a badge's **unicast address** = one badge; send to the shared group
   **`0xC000`** = all badges. (`0xFFFF` all-nodes also works for broadcast.)
-- **Vendor model** — a custom model carries the config + image opcodes (see below).
+- **Vendor model** — a custom model carries the (now small, ephemeral) mesh opcodes (see below).
 - **Zero-config** — every badge ships with the **same baked-in net/app/dev keys** and
   self-provisions at boot (no PB-ADV commissioning). The controller app must be seeded with the
   same keys. Security tradeoff is intentional — see [mesh_keys.h](src/mesh_keys.h).
 
 There's also a **direct self-onboarding path**: press the button and the badge shows a unique ID +
-QR; a phone scans it and connects over a custom GATT service (Web Bluetooth) to set the name and
-upload a hand-drawn badge face. See **Config mode** below.
+QR; the QR is a **native-app deep link** (`vibamix://connect?name=vibamix-<CODE>`) that opens the
+vibamix app, which connects over a custom GATT service to set the name and upload a hand-drawn badge
+face. (A Web Bluetooth page can drive the same service as a fallback.) See **Config mode** below.
 
 History / out-of-scope:
 
@@ -149,29 +153,30 @@ Company ID `CONFIG_BT_COMPANY_ID` (Nordic `0x0059` for the prototype), vendor mo
 `0x0001`. Opcodes are 3-byte (`BT_MESH_MODEL_OP_3`). Defined + handled in
 [mesh_model.c](src/mesh_model.c):
 
+The mesh surface is deliberately **small and ephemeral** — only live LED, render-only image,
+heartbeat, and draw-only text. **All stored content** (name, table id, the 20 text frames, the 4
+image slots, per-frame LED, display selection) is **GATT-only** now (the `0x01/0x02/0x0A/0x0B/0x0C`
+opcodes that used to set those over mesh were removed).
+
 | Opcode | Name | Payload |
 |--------|------|---------|
-| `0x01` | `SET_NAME` | UTF-8 string (attendee name) |
-| `0x02` | `SET_FUN_FACT` | UTF-8 string |
-| `0x03` | `SET_LED_COLOR` | `r, g, b` (3 bytes) |
-| `0x04` | `IMG_START` | `le16 size, le16 width, le16 height` (legacy 1bpp render) |
+| `0x03` | `SET_LED` | `anim, r, g, b` (4 bytes; live, not stored) |
+| `0x04` | `IMG_START` | `le16 size, le16 width, le16 height` (render-only 1bpp) |
 | `0x05` | `IMG_DATA` | `le16 offset, bytes[]` |
 | `0x06` | `IMG_END` | `le32 crc32` (IEEE) |
 | `0x07` | `HEARTBEAT` | optional UTF-8 event name (≤8 B, kept unsegmented) — sent at 1 Hz; keeps an awake badge awake (resets config window) **and** drives the mesh-mode bottom countdown bar ([event_status.cpp](src/event_status.cpp)) |
-| `0x08` | `SET_SCREEN_HDR` | `u8 idx`, header bytes (starts a screen push) |
-| `0x09` | `SET_SCREEN_BODY` | `u8 idx, u8 seq, u8 last`, body bytes (chunked) |
-| `0x0A` | `DISPLAY_SCREEN` | `u8 kind` (0=text screen, 1=image slot), `u8 idx` |
-| `0x0B` | `SET_ATTENDEE` | UTF-8 string (attendee/table id, ≤10 chars) |
-| `0x0C` | `SET_FRAME_LED` | `u8 kind, u8 idx, u8 anim, r, g, b` (per-screen/slot LED) |
+| `0x08` | `SHOW_TEXT_HDR` | header bytes (starts an **ephemeral, not stored** text draw) |
+| `0x09` | `SHOW_TEXT_BODY` | `u8 seq, u8 last`, body bytes (chunked) |
 
-Content/display/name are mesh-broadcastable to all badges; **image-slot uploads are GATT-only**
-(too large for the mesh). Mesh text/display delivery is best-effort (unacked flooding). Stored
-content (name, 20 text screens, displayed-screen selection) lives in ZMS via
-[app_config.c](src/app_config.c); the 4 image slots live raw in the `images` flash partition via
-[badge_store.c](src/badge_store.c). 2-bit grayscale images are dithered to 1bpp on display
-([dither.c](src/dither.c)); a per-slot format flag also allows storing a panel-native 1-bit image.
-The heartbeat→awake-window hand-off is thread-safe via an `atomic_t` flag the ConfigMode loop
-consumes (the BT thread never writes the 64-bit `s_last_activity`).
+A host with no mesh radio injects these by writing the full access payload (3-byte opcode + params)
+to the **`f0de000C` mesh-TX gateway** char of a config-mode badge, which re-originates it to the
+group. **Image-slot uploads / stored content are GATT-only**; mesh image/text delivery is
+best-effort (unacked flooding). Stored content lives in ZMS via [app_config.c](src/app_config.c);
+the 4 image slots live raw in the `images` flash partition via [badge_store.c](src/badge_store.c).
+2-bit grayscale images are dithered to 1bpp on display ([dither.c](src/dither.c)); a per-slot format
+flag also allows storing a panel-native 1-bit image. The heartbeat→awake-window hand-off is
+thread-safe via an `atomic_t` flag the ConfigMode loop consumes (the BT thread never writes the
+64-bit `s_last_activity`).
 
 **Addressing:** send to a badge's unicast address for one badge, or to group `0xC000`
 (`VIBAMIX_GROUP_ADDR`) for all badges. The unicast address is derived deterministically from
@@ -179,8 +184,9 @@ the FICR device id in `MeshNode::init` (`sys_get_le16(uuid) & 0x7FFF`).
 
 **Self-provisioning sequence** (`MeshNode::init`): `bt_enable` → `bt_mesh_init(&prov, comp)` →
 `settings_load()` → if not already provisioned, `bt_mesh_provision(net_key, …, addr, dev_key)`
-+ `bt_mesh_app_key_add` with the baked keys → `mesh_model_bind_and_subscribe(app_idx, 0xC000)`
-→ `bt_mesh_prov_enable(BT_MESH_PROV_GATT)`.
++ `bt_mesh_app_key_add` with the baked keys → `mesh_model_bind_and_subscribe(app_idx, 0xC000)`.
+There is **no** `bt_mesh_prov_enable(GATT)` / proxy step — mesh PDUs travel over the advertising
+bearer only; the badge is connectable (for config/gateway) only in config mode.
 
 **Image transfer reality:** ~56 segmented messages for a 5808-byte frame at
 `SEG_MAX=10`. Segmented sends to a **group are unacknowledged** — a dropped segment leaves a
@@ -189,7 +195,7 @@ reliable "image to all," push per-badge unicast (acked) or add an app-level NACK
 (the controller asks for missing offsets). The ePaper full refresh is ~2 s, so the panel is
 redrawn only on a verified `IMG_END`, never per chunk.
 
-## Config mode (button → QR → Web Bluetooth self-onboarding)
+## Config mode (button → QR → native-app self-onboarding)
 
 A second, **direct** path (independent of the mesh) lets an attendee configure their *own*
 badge from a phone. The badge normally sleeps in **System OFF** ~5 s after each wake
@@ -200,42 +206,46 @@ badge from a phone. The badge normally sleeps in **System OFF** ~5 s after each 
   boot is `RESET_POR`/`RESET_PIN`). It clears the cause (RESETREAS is sticky). Button-wake →
   **config mode**; otherwise the normal boot→5 s LEDs→sleep path.
 - **Config screen** ([qr_screen.cpp](src/qr_screen.cpp)): renders a **QR** (vendored qrcodegen,
-  version pinned ≤5) encoding `…/?id=<CODE>` plus the human `<CODE>` — a 4-hex code from the same
-  FICR id as the mesh unicast address ([identity.c](src/identity.c), shared so they always match).
+  version pinned ≤5) encoding the native-app deep link `vibamix://connect?name=vibamix-<CODE>` plus
+  the human `<CODE>` — a 4-hex code from the same FICR id as the mesh unicast address
+  ([identity.c](src/identity.c), shared so they always match).
 - **Custom GATT config service** ([config_gatt.c](src/config_gatt.c)) — 128-bit UUIDs (base
-  `f0de00xx-4b1c-4e2a-9a11-a1b2c3d4e5f6`), reachable by a browser over the mesh-proxy or the fast
-  config-mode connection (the per-device GAP name `vibamix-<CODE>` is carried in the scan response via
-  `CONFIG_BT_MESH_PROXY_USE_DEVICE_NAME`). Chunk ops are `0x01` START / `0x02` DATA / `0x03` END.
+  `f0de00xx-4b1c-4e2a-9a11-a1b2c3d4e5f6`), reachable over the fast config-mode connection (the
+  per-device GAP name `vibamix-<CODE>` is set at runtime via `bt_set_name()` and carried in the
+  advertiser's scan response). The service is **consolidated to one read/write characteristic per
+  frame type** (identity/text/image); writes are tagged by a leading **op byte**: `0x01` START /
+  `0x02` DATA / `0x03` END / `0x10` META / `0x20` DISPLAY / `0x21` SELECT / `0x22` READ_AT.
   Full byte layouts are in [docs/ble-config-api.md](docs/ble-config-api.md); this is the index:
   | Char | Access | Payload |
   |------|--------|---------|
   | `f0de0001` | (service) | — |
-  | `f0de0002` | write / wnr | legacy 1bpp image, **render-only** (no slot). START `le16 size,w,h` / DATA `le16 off,bytes` / END `le32 crc32` → `image_xfer` |
-  | `f0de0003` | write | UTF-8 attendee **name** |
-  | `f0de0004` | write | **text screen** store. START `idx,hlen,header` / DATA `le16 off,body` / END → `on_screen` |
-  | `f0de0005` | write / wnr | **image slot** store (1bpp or 2-bit). START `slot,fmt,le16 size,w,h` / DATA / END |
-  | `f0de0006` | write | **display** a stored screen: `kind, idx` |
-  | `f0de0007` | write | **attendee/table id** (UTF-8, ≤10) |
-  | `f0de0008` | write | **per-frame LED**: `kind, idx, anim, r, g, b` |
+  | `f0de0002` | write / wnr | quick 1bpp image, **render-only** (no slot). START `le16 size,w,h` / DATA / END → `image_xfer` |
+  | `f0de0003` | read/write/wnr | **identity frame**: META `namelen,name,idlen,id,anim,r,g,b`; gray2 image START `fmt,le16 size,w,h`/DATA/END; DISPLAY; SELECT `want_pixels` → read-back |
+  | `f0de0004` | read/write/wnr | **text frame** (0–19): START `idx,anim,r,g,b,hlen,header`/DATA/END; META `idx,anim,r,g,b` (LED-only); DISPLAY `idx`; SELECT `idx` |
+  | `f0de0005` | read/write/wnr | **image frame** (slot 0–3, 1bpp/2-bit): START `slot,fmt,anim,r,g,b,le16 size,w,h`/DATA/END; META `slot,anim,r,g,b`; DISPLAY `slot`; SELECT `slot,want_pixels` |
   | `f0de0009` | write / wnr | **OTA** to the inactive slot. START `le32 total` / DATA `le32 off,bytes` / END `le32 crc32` |
   | `f0de000A` | read | **OTA status**: `active_slot, inactive_slot, le32 active_version` (read this first) |
   | `f0de000B` | write / wnr / **notify** | **keepalive** — 1-byte counter; app writes 1 Hz, badge notifies 1 Hz. Must stay last |
-  | `f0de000C` | read | **config snapshot** (name/fact/attendee/color/display + screen titles + slot presence) |
-  | `f0de000D` | write+read | **screen read-back**: write idx to select, then read header+body |
-  | `f0de000E` | write+read | **image read-back**: write slot to select, then read fmt/w/h/pixels |
-  Handlers key off the actual `len` (browsers negotiate varying MTU). The legacy image char reuses
-  the **same** `image_xfer` reassembly + `MeshNode::on_image` render path as the mesh.
-- **Fast config-mode advertiser** ([ConfigMode.cpp](src/ConfigMode.cpp)): a dedicated **connectable
-  extended-advertising set** carrying the config service UUID + per-device name in the AD, started in
-  config mode for instant discovery alongside the mesh proxy advert. Needs a spare adv set —
-  `CONFIG_BT_EXT_ADV_MAX_ADV_SET=5` (mesh reserves up to 4; do **not** lower it below mesh's need).
-  Image/screen renders triggered from a BT-thread callback are **deferred to the main loop** (lock-free
-  ping-pong buffers) so the ~2 s ePaper refresh never blocks the BT thread and drops the connection.
+  | `f0de000C` | write / wnr | **mesh-TX gateway** — re-originate a vendor-model access payload (3-byte opcode + params) onto the `0xC000` group |
+  Read-back is **SELECT (`0x21`) → READ_AT (`0x22`) → read** on the `0003/0004/0005` frame chars
+  (the old `000C/000D/000E` snapshot/read-back chars and the separate `0006/0007/0008`
+  display/attendee/frame-LED chars are gone — folded into the frame chars' ops). Handlers key off the
+  actual `len` (clients negotiate varying MTU). The quick image char reuses the **same** `image_xfer`
+  reassembly + `MeshNode::on_image` render path as the mesh.
+- **Fast config-mode advertiser** ([ConfigMode.cpp](src/ConfigMode.cpp)): a dedicated **legacy
+  connectable + scannable advertising set** carrying the config service UUID in the primary AD and the
+  per-device name in the scan response, started in config mode for instant discovery. Needs a spare
+  adv set — `CONFIG_BT_EXT_ADV_MAX_ADV_SET=5` (the mesh stack reserves several; do **not** lower it
+  below its need). Image/screen renders triggered from a BT-thread callback are **deferred to the main
+  loop** (lock-free ping-pong buffers) so the ~2 s ePaper refresh never blocks the BT thread and drops
+  the connection.
 - **Window/exit** ([ConfigMode.cpp](src/ConfigMode.cpp)): stays awake 180 s, reset on any
-  connection/write activity; a second button press exits. On exit it disconnects cleanly, then
-  `main()` powers off. The uploaded image is preserved across the next boot via the
-  `has_custom_image` flag in [app_config.c](src/app_config.c) (the ePaper is bistable, so the blob
-  itself is **not** stored) — `MeshNode::apply_persisted_config()` skips the identity redraw when set.
+  connection/write activity. Config mode exits on a **second button press** *or* on a **GATT
+  disconnect** after having been connected; on exit it tears down cleanly (LEDs off, stop the
+  advertiser, disconnect any link), then `main()` restores the home identity frame and runs the
+  heartbeat-aware mesh-mode countdown (`run_awake_window`) — re-entering config needs another button
+  press. The ePaper is bistable, so a pushed image stays on the panel across the next boot even
+  though the pixels aren't re-persisted.
 - **Live status on the config screen:** the QR screen also shows the **battery** (voltage + percent
   + a fill icon) and a **countdown** to window end. Battery is read **once** at entry via
   [battery.c](src/battery.c) (gated SAADC on AIN7, ×2 divider, 1S-LiPo curve). The countdown ticks
@@ -245,11 +255,13 @@ badge from a phone. The badge normally sleeps in **System OFF** ~5 s after each 
   the countdown stops repainting (ConfigMode re-points the `image_xfer` completion callback in config
   mode). Partial refresh is **hardware-validated TODO** (orientation/ghosting) — fall back to
   `EPD_*_Fast` full refresh + a coarser countdown if the panel looks bad.
-- **URL base** is a single `#define VIBAMIX_CONFIG_URL_BASE` in [ConfigMode.cpp](src/ConfigMode.cpp)
-  — **set it to the real GitHub Pages URL.** Keep it short so the QR stays a low version.
-- **The webpage is a documented follow-up** (not in-tree yet): Web Bluetooth, filter
-  `namePrefix:"vibamix-"`, `optionalServices:[f0de0001-…]`; canvas → 176×264 1bpp → chunked writes.
-  Web Bluetooth needs Chromium (Android/desktop); **iPhone users open it in the Bluefy browser**.
+- **QR deep link** is a single `#define VIBAMIX_CONFIG_QR_PREFIX` in
+  [ConfigMode.cpp](src/ConfigMode.cpp) (`vibamix://connect?name=vibamix-`, with `<CODE>` appended) —
+  a **native-app** scheme. Keep it short so the QR stays a low version.
+- **The native app is the documented consumer** (not in-tree yet): registers the `vibamix://` scheme,
+  scans/filters by `namePrefix:"vibamix-"`, and drives the config service. A **Web Bluetooth** page
+  can serve as a fallback (`optionalServices:[f0de0001-…]`; needs Chromium / Bluefy on iOS). See
+  [docs/ble-config-api.md](docs/ble-config-api.md).
 
 ## Persistent content (what a badge stores)
 
@@ -307,13 +319,16 @@ The `f0de000B` keepalive char is a **GATT, per-connection** ping — distinct fr
 the value attr **must be the last characteristic** so `config_gatt_keepalive_notify` can find it at
 `attrs[attr_count - 2]` (CCC is last). ConfigMode drives both directions and feeds the gateway dot.
 
-## Config read-back (`000C` / `000D` / `000E`)
+## Config read-back (SELECT → READ_AT on the frame chars)
 
-Lets the host fetch what's currently stored: `000C` returns a single-read **snapshot** (name, fact,
-attendee, color, display selection, all 20 screen titles, and which image slots are present);
-`000D`/`000E` are **select-then-read** (write an index/slot, then read the full screen body or the
-image pixels). Zephyr's `bt_gatt_attr_read` + the host's ATT read-blob transparently serve values
-larger than the MTU. Host side: `BadgeLink.read_config_snapshot/read_screen/read_image` in
+Lets the host fetch what's currently stored, **per frame**, on the same `0003`/`0004`/`0005`
+characteristics it writes (there is no separate snapshot/read-back char anymore). Flow: write
+**SELECT** (`0x21` + a frame selector — identity `want_pixels`, text `idx`, image `slot,want_pixels`)
+to serialize that frame into the badge's read buffer, then **read in MTU-sized windows**, advancing
+the base with **READ_AT** (`0x22` + `le16 off`) until a read returns 0 bytes. The app-level windowing
+is required because macOS/CoreBluetooth caps a single characteristic read at 512 B while an image
+frame is multi-KB. Serialized layouts are in [docs/ble-config-api.md](docs/ble-config-api.md) §9.4.
+Host side: `BadgeLink.read_identity/read_text_frame/read_image_frame` in
 [badgectl/badgectl/ble.py](../badgectl/badgectl/ble.py).
 
 ## Build / flash / debug
@@ -371,7 +386,7 @@ cross-checked against the schematic in `kicad/vibamix_xiao/`.
 | Peripheral | Bus | Pins | Driver / compatible | Status |
 |-----------|-----|------|---------------------|--------|
 | ePaper display (GDEY027T91, 176×264) | spi00 @ 4 MHz | SCK P2.01, MOSI P2.02 (no MISO), CS P2.07, D/C P2.08, RST P2.09, BUSY P2.10 | `pants-for-birds,epaper` (custom) | working (on high-speed SERIAL00 to free SERIAL20 for the sensor) |
-| WS2812B RGB LEDs (D4–D7, 4-LED chain) | spi21 @ 4 MHz | DIN P1.06 (MOSI only; SCK P1.05 is NC) | `worldsemi,ws2812-spi`, `chain-length=4` | scrolling wheel + blob → solid on mesh `SET_LED_COLOR` (bus **must** be 4 MHz to match the 0x70/0x40 frames) |
+| WS2812B RGB LEDs (D4–D7, 4-LED chain) | spi21 @ 4 MHz | DIN P1.06 (MOSI only; SCK P1.05 is NC) | `worldsemi,ws2812-spi`, `chain-length=4` | scrolling wheel + blob → animation on mesh `SET_LED` (`anim,r,g,b`) (bus **must** be 4 MHz to match the 0x70/0x40 frames) |
 | LED power gate | GPIO | `led_enable` P1.07, active-low (drives a PMOS) | `gpio-leds` | working |
 | Ambient light sensor (LTR-329ALS-01) | i2c20 | SDA P1.10, SCL P1.11 | — | **bus enabled (SERIAL20, freed by moving ePaper to spi00), sensor node TODO** |
 | Battery voltage monitor | SAADC | AIN7 P1.14 (10K/10K divider, ×2), enable VBAT_EN P1.15 (TPS22916, active-high) | `&adc` chan0 + `vbat_enable` gpio | read once in config mode ([battery.c](src/battery.c)) |
@@ -400,20 +415,22 @@ images + ZMS once (mesh re-provisions from baked keys). A partition-layout chang
 `west flash --erase`.
 
 Build footprint (approx, drifts every build): app image is a **small fraction of the 512 KB slot**
-and RAM use is roughly half — comfortable headroom even with the mesh + proxy + relay stack, the
+and RAM use is roughly half — comfortable headroom even with the mesh + relay stack, the
 config GATT service, and qrcodegen. Check the `west build` Memory Regions report for current numbers.
 
 Key Kconfig ([prj.conf](prj.conf)):
 
-- **Mesh:** `CONFIG_BT_MESH`, `BT_MESH_RELAY` (flood), `BT_MESH_GATT_PROXY` + `BT_MESH_PB_GATT`
-  (phone ingress), `BT_OBSERVER`, `BT_PERIPHERAL`. Deliberately **no** `BT_MESH_DK_PROV` —
-  badges self-provision, never commissioned over PB-ADV.
+- **Mesh:** `CONFIG_BT_MESH`, `BT_MESH_RELAY` (flood), `BT_OBSERVER`, `BT_PERIPHERAL` (the config
+  service, config mode only). Deliberately **no** `BT_MESH_GATT_PROXY` / `BT_MESH_PB_GATT`
+  (no always-on connectable proxy advert) and **no** `BT_MESH_DK_PROV` — badges self-provision with
+  baked keys, never commissioned over PB-ADV, and are connectable only in config mode.
 - **SAR (image chunking):** `BT_MESH_RX_SEG_MAX=10`, `BT_MESH_TX_SEG_MAX=10`,
   `BT_MESH_RX_SEG_MSG_COUNT=2`, `BT_MESH_MODEL_GROUP_COUNT=2`, `BT_MESH_MODEL_KEY_COUNT=1`.
 - **Persistence:** `CONFIG_SETTINGS` + `CONFIG_ZMS` (nRF54L15 uses **ZMS, not NVS**),
   `CONFIG_BT_SETTINGS` (mesh seq/RPL/IV across reboots), `CONFIG_FLASH`/`FLASH_MAP`.
-- **Config mode:** `BT_DEVICE_NAME_DYNAMIC` + `BT_MESH_PROXY_USE_DEVICE_NAME` (per-device name
-  in the proxy scan response for Web Bluetooth discovery), `BT_MAX_CONN=2` (proxy + browser),
+- **Config mode:** `BT_DEVICE_NAME_DYNAMIC` (the per-device GAP name `vibamix-<CODE>` is set at
+  runtime via `bt_set_name()` on the config-mode advertiser — there is no proxy scan response),
+  `BT_EXT_ADV` + `BT_EXT_ADV_MAX_ADV_SET=5` (room for the config advertiser), `BT_MAX_CONN=2`,
   `BT_L2CAP_TX_MTU=247` / `BT_BUF_ACL_*=251` / `BT_CTLR_DATA_LENGTH_MAX=251` (fast GATT upload),
   and `CONFIG_POWEROFF` (System OFF deep sleep).
 - **Misc:** `CONFIG_HWINFO` (device-id → unicast addr + config code), `CONFIG_CPP`, `SPI`, `GPIO`,
@@ -488,7 +505,7 @@ nRF54L15 the whole mesh stack runs on `cpuapp`.
   [mesh_model.c](src/mesh_model.c), a `mesh_config_handlers` entry, and wire it in
   [MeshNode.cpp](src/MeshNode.cpp).
 - **Mesh network identity / keys / group** → [mesh_keys.h](src/mesh_keys.h).
-- **Provisioning / proxy / relay behavior** → [MeshNode.cpp](src/MeshNode.cpp) and the
+- **Provisioning / relay behavior** → [MeshNode.cpp](src/MeshNode.cpp) and the
   `CONFIG_BT_MESH_*` options in [prj.conf](prj.conf).
 - **Persisted config (what survives reboot)** → [app_config.c](src/app_config.c).
 - **Stored text screens / displayed-screen model** → [app_config.c](src/app_config.c) (struct +
@@ -502,14 +519,16 @@ nRF54L15 the whole mesh stack runs on `cpuapp`.
   calls in [MeshNode.cpp](src/MeshNode.cpp)).
 - **Keepalive** → the `f0de000B` char in [config_gatt.c](src/config_gatt.c) +
   `config_gatt_keepalive_notify`, driven from [ConfigMode.cpp](src/ConfigMode.cpp).
-- **Config read-back (snapshot / screen / image)** → `f0de000C/D/E` in
-  [config_gatt.c](src/config_gatt.c) (host side in [badgectl/badgectl/ble.py](../badgectl/badgectl/ble.py)).
+- **Config read-back (identity / text / image)** → SELECT/READ_AT ops on the `f0de0003/0004/0005`
+  frame chars in [config_gatt.c](src/config_gatt.c) (host side in [badgectl/badgectl/ble.py](../badgectl/badgectl/ble.py)).
+- **Mesh-TX gateway (host → mesh ingress)** → the `f0de000C` char in [config_gatt.c](src/config_gatt.c)
+  → `MeshNode::on_mesh_tx`.
 - **Battery read / curve** → [battery.c](src/battery.c) + the `&adc` channel + `vbat_enable` in the DTS.
 - **GATT/OTA wire format (byte layouts)** → [docs/ble-config-api.md](docs/ble-config-api.md) (keep it
   in sync with [config_gatt.c](src/config_gatt.c)).
 - **Image transfer protocol / reliability (NACK)** → [image_xfer.c](src/image_xfer.c).
-- **Config-mode flow / window / exit** → [ConfigMode.cpp](src/ConfigMode.cpp); the QR/URL base is
-  `VIBAMIX_CONFIG_URL_BASE` there.
+- **Config-mode flow / window / exit** → [ConfigMode.cpp](src/ConfigMode.cpp); the QR deep-link
+  prefix is `VIBAMIX_CONFIG_QR_PREFIX` there.
 - **Config GATT service / chars / UUIDs** → [config_gatt.c](src/config_gatt.c).
 - **Config screen layout / QR rendering** → [qr_screen.cpp](src/qr_screen.cpp).
 - **Unique ID / config code derivation** → [identity.c](src/identity.c) (shared with the mesh addr).

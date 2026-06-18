@@ -12,9 +12,12 @@ extern "C" {
 
 /*
  * Vibamix vendor model: the badge's BROADCAST command surface over Bluetooth
- * Mesh. Mesh commands affect every badge at once and are ephemeral — they draw
- * or override live state and are never stored. Per-badge persistent config
- * (name, ID, frames, per-frame LEDs, ...) is GATT-only (see config_gatt.h).
+ * Mesh. Mesh commands affect every badge at once. Most are ephemeral — they draw
+ * or override live state and store nothing (LED, render-only image/text). The one
+ * exception is DISPLAY: it carries no content, it just tells every badge to show a
+ * frame it already has stored (and latches that as its displayed-frame selection).
+ * Per-badge persistent *content* (name, ID, frames, per-frame LEDs, ...) is
+ * GATT-only (see config_gatt.h).
  *
  * The composition data, element/model tables and opcode handlers live here in C
  * because the BT_MESH_MODEL_* macros use C99 compound literals (not valid C++).
@@ -32,6 +35,9 @@ struct mesh_config_handlers {
 	 * reassembled from mesh chunks. */
 	void (*show_text)(const char *title, size_t tlen,
 			  const char *body, size_t blen);
+	/* Show an already-stored frame on every badge (no content transferred):
+	 * kind 0 = text screen idx, 1 = image slot idx, 2 = identity (idx ignored). */
+	void (*display_screen)(uint8_t kind, uint8_t idx);
 };
 
 /* Register the C++ side callbacks. Pass a pointer with static lifetime. */

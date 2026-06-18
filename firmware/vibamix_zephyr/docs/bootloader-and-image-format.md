@@ -44,8 +44,8 @@ Properties this gives us:
 | `bl_state` | `bl_state_partition` | `0xC000` | 8 KB | per‑slot boot metadata append log (2 × 4 KB sectors) |
 | **`image-a` (slot A)** | `slot_a_partition` | `0xE000` | 512 KB | app image, A build |
 | **`image-b` (slot B)** | `slot_b_partition` | `0x8E000` | 512 KB | app image, B build |
-| `images` | `images_partition` | `0x10E000` | 64 KB | 4 × 16 KB raw badge‑image slots (unrelated to OTA) |
-| `storage` | `storage_partition` | `0x11E000` | 284 KB | settings (ZMS); `chosen { zephyr,settings-partition }` |
+| `images` | `images_partition` | `0x10E000` | 80 KB | 5 × 16 KB raw badge‑image slots (unrelated to OTA) |
+| `storage` | `storage_partition` | `0x122000` | 264 KB | settings (ZMS); `chosen { zephyr,settings-partition }` |
 
 The two app slots are **equal size** (512 KB) — required so an image linked for A is the same size
 budget as B. The actual app image is a small fraction of a slot.
@@ -139,7 +139,7 @@ current snapshot.
 | u8  | `valid` | 1 = an OTA wrote + CRC‑verified this slot |
 | u8  | `confirmed` | 1 = the app booted **healthily** from this slot |
 | u8  | `attempts` | trial boots since the last confirm (cap `BL_MAX_ATTEMPTS = 3`) |
-| u8  | `rsvd` | 0 |
+| u8  | `stale` | 1 = superseded by a newer install (still bootable, deprioritized) |
 
 App‑side helpers (read‑modify‑append): `bl_state_set_pending(slot, version, image_len)` (OTA just
 wrote a slot), `bl_state_confirm(slot)` (healthy boot), `bl_state_inc_attempts(slot)` (bump trial
@@ -155,9 +155,13 @@ count — the bootloader calls this before a trial jump).
    flash‑debug path: a debugger `load`s an unsigned ELF into slot A and we run it as‑is, so the F5
    load/reset loop works without trailers or `bl_state`.
 2. **Normal pick** from `bl_state`: among slots that are `valid`, whose **trailer CRC live‑verifies**,
-   and that are `confirmed` **or** still have a trial attempt left (`attempts < 3`), choose the
-   **highest `version`**. A slot that is unconfirmed and out of attempts is skipped (→ revert to the
-   other confirmed slot).
+   and that are `confirmed` **or** still have a trial attempt left (`attempts < 3`), prefer the
+   **not‑`stale`** slot — i.e. the **most recently installed** image — and on a tie keep the lower
+   index (slot A). The pick is **version‑independent** (so equal‑version A/B `.ota` bundles install
+   correctly); the `stale` flag, not `version`, drives the choice. An OTA marks the freshly‑written
+   slot fresh and the other `stale`, so the new image is picked while the old slot stays bootable as a
+   revert target. A slot that is unconfirmed and out of attempts is skipped (→ revert to the other
+   slot).
 3. **Fallback — fresh SWD flash:** if `bl_state` has nothing usable and slot A was never recorded,
    **scan slot A** for a self‑consistent trailer and trial‑boot it (recording it pending first).
 4. **Last resort:** scan **both** slots for any CRC‑valid image and trial‑boot the highest‑version

@@ -23,8 +23,8 @@ linking (see below).
 | bl_state | `0xC000` | 8 KB | per-slot OTA state |
 | **slot A** (`image-a`) | `0xE000` | 512 KB | app (default `zephyr,code-partition`) |
 | slot B (`image-b`) | `0x8E000` | 512 KB | OTA alternate |
-| images | `0x10E000` | 64 KB | 4 stored badge image slots |
-| storage | `0x11E000` | 284 KB | settings (ZMS) |
+| images | `0x10E000` | 80 KB | 5 stored badge image slots (4 user + identity) |
+| storage | `0x122000` | 264 KB | settings (ZMS) |
 
 ## 0. Toolchain environment
 

@@ -120,8 +120,19 @@ void Epaper_READBUSY(void)
 	// Poll with a 1 ms yield rather than a tight spin: a refresh holds BUSY for
 	// hundreds of ms (partial) to ~2 s (full), and busy-spinning would starve the
 	// LED render thread (causing visible animation stutter) and waste power.
+	//
+	// Bound the wait (~3 s, above the ~2 s worst-case full refresh) and return on
+	// timeout rather than spinning forever: if two threads ever drive the panel
+	// concurrently (a regression) or BUSY genuinely sticks, an unbounded wait here
+	// hangs the calling thread permanently — which, on the main thread, kills the
+	// user button. A bounded wait turns that into a transient, self-recovering error.
+	uint32_t start = k_uptime_get_32();
 	while (isEPD_W21_BUSY != 0)
 	{ //=1 BUSY
+		if (k_uptime_get_32() - start >= 3000) {
+			printk("EPD: BUSY wait timed out\n");
+			return;
+		}
 		k_msleep(1);
 	}
 }

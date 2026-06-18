@@ -17,6 +17,10 @@ public:
     void init();
     void show_hello_world();
 
+    // Push a fully blank (white) frame — used when a selected frame has no stored
+    // content, so the bistable panel doesn't keep showing the previous image.
+    void show_blank();
+
     // Re-initialize the panel after a deep sleep, before redrawing.
     void wake();
 

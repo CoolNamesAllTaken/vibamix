@@ -94,7 +94,6 @@ class MainWindow(QMainWindow):
         self.crypto = MeshCrypto(keys.NET_KEY, keys.APP_KEY, keys.IV_INDEX)
         self._seqstore: SeqStore | None = None
         self._led = (255, 80, 0)
-        self._gatt_img: bytes | None = None
         self._slot_img: bytes | None = None
         self._idimg: bytes | None = None
 
@@ -646,31 +645,6 @@ class MainWindow(QMainWindow):
         w = QWidget()
         v = QVBoxLayout(w)
 
-        # Quick render: draw an image now without storing it to a frame (f0de0002).
-        g = QGroupBox("Quick render — draw now, not stored (f0de0002, 1bpp)")
-        gl = QGridLayout(g)
-        self.g_img_path = QLineEdit()
-        self.g_img_path.setReadOnly(True)
-        browse = QPushButton("Browse…")
-        browse.setObjectName("ghost")
-        browse.clicked.connect(lambda: self._pick_image(self.g_img_path, self.g_img_preview, "bw", "_gatt_img", True))
-        self.g_img_dither = QCheckBox("Floyd–Steinberg dither")
-        self.g_img_dither.setChecked(True)
-        self.g_img_dither.stateChanged.connect(lambda: self._reload_image(self.g_img_path, self.g_img_preview, "bw", "_gatt_img", True))
-        self.g_img_preview = QLabel()
-        self.g_img_preview.setFixedSize(264, 176)
-        self.g_img_preview.setStyleSheet("background:#11141a;border:1px solid #3a3f4b;border-radius:6px;")
-        self.g_img_prog = QProgressBar()
-        up = QPushButton("Upload")
-        up.clicked.connect(lambda: self._go(self._upload_render_image()))
-        gl.addWidget(self.g_img_path, 0, 0)
-        gl.addWidget(browse, 0, 1)
-        gl.addWidget(self.g_img_dither, 1, 0)
-        gl.addWidget(self.g_img_preview, 2, 0, 1, 2, Qt.AlignmentFlag.AlignHCenter)
-        gl.addWidget(self.g_img_prog, 3, 0, 1, 2)
-        gl.addWidget(up, 4, 1)
-        v.addWidget(g)
-
         # Firmware OTA (direct-XIP A/B)
         g = QGroupBox("Firmware update / OTA (f0de0009)")
         gl = QGridLayout(g)
@@ -696,7 +670,7 @@ class MainWindow(QMainWindow):
         v.addWidget(g)
         v.addStretch()
 
-        self._gatt_actions += [browse, up, obrowse, oup]
+        self._gatt_actions += [obrowse, oup]
         return w
 
     def _slot_fmt_name(self) -> str:
@@ -718,21 +692,13 @@ class MainWindow(QMainWindow):
             return
         try:
             if fmt == "bw":
-                buf = imageconv.to_bw(path, dither=self.g_img_dither.isChecked() if attr == "_gatt_img" else True)
+                buf = imageconv.to_bw(path, dither=True)
             else:
                 buf = imageconv.to_gray2(path)
             setattr(self, attr, buf)
             preview.setPixmap(pil_to_pixmap(imageconv.unpack_preview(buf, fmt)))
         except Exception as e:  # noqa: BLE001
             self._log(f"image error: {e}")
-
-    async def _upload_render_image(self) -> None:
-        if not self._gatt_img:
-            self._log("Pick an image first.")
-            return
-        self._log("Uploading render-only image …")
-        await self.link.upload_image(self._gatt_img, on_progress=lambda d, n: self.g_img_prog.setValue(int(d * 100 / n)))
-        self._log("Image upload complete (badge refreshes ~2 s).")
 
     def _pick_ota(self) -> None:
         fn, _ = QFileDialog.getOpenFileName(self, "Pick .ota bundle", "", "OTA bundle (*.ota)")
@@ -933,10 +899,44 @@ class MainWindow(QMainWindow):
         gl.addRow("Body", self.m_scr_body)
         gl.addRow("", msb)
         v.addWidget(g)
+
+        # Display a stored frame: tell every badge to show a frame it already has
+        # stored (identity, or an image/text frame by index). No content is sent —
+        # badges that don't have that frame stored just ignore it.
+        g = QGroupBox("Display a stored frame — on all badges")
+        gl = QHBoxLayout(g)
+        self.m_disp_kind = QComboBox()
+        self.m_disp_kind.addItem("Identity", keys.DISP_KIND_IDENTITY)
+        self.m_disp_kind.addItem("Text frame", keys.DISP_KIND_TEXT)
+        self.m_disp_kind.addItem("Image frame", keys.DISP_KIND_IMAGE)
+        self.m_disp_idx = QSpinBox()
+        self.m_disp_idx.setRange(0, 19)
+        self.m_disp_kind.currentIndexChanged.connect(self._sync_disp_idx)
+        dsb = QPushButton("Show on all")
+        dsb.clicked.connect(lambda: self._go(self._mesh_display_frame()))
+        gl.addWidget(QLabel("Frame"))
+        gl.addWidget(self.m_disp_kind)
+        gl.addWidget(QLabel("Index"))
+        gl.addWidget(self.m_disp_idx)
+        gl.addStretch()
+        gl.addWidget(dsb)
+        v.addWidget(g)
+        self._sync_disp_idx()
         v.addStretch()
 
-        self._mesh_actions = [hb, pick, cb, msb, self.m_hb_auto]
+        self._mesh_actions = [hb, pick, cb, msb, dsb, self.m_hb_auto]
         return w
+
+    def _sync_disp_idx(self) -> None:
+        # Identity has no index; text frames are 0-19, image frames 0-3.
+        kind = self.m_disp_kind.currentData()
+        self.m_disp_idx.setEnabled(kind != keys.DISP_KIND_IDENTITY)
+        self.m_disp_idx.setMaximum(3 if kind == keys.DISP_KIND_IMAGE else 19)
+
+    async def _mesh_display_frame(self) -> None:
+        kind = self.m_disp_kind.currentData()
+        idx = 0 if kind == keys.DISP_KIND_IDENTITY else self.m_disp_idx.value()
+        await self._mesh_send(keys.OP_DISPLAY, bytes([kind, idx]))
 
     # ---------- Batch tab ----------
     def _build_batch_tab(self) -> QWidget:

@@ -48,15 +48,14 @@ void identity_screen_draw(GUI &gui, const char *name, const char *table,
  * live awake-window countdown. */
 void identity_banner_over(GUI &gui, const char *name, const char *table);
 
-/* Re-composite the identity frame's bottom banner + a thin countdown fill onto an
- * already-built framebuffer (call identity_screen_draw first, push it as the
- * partial-refresh base, then call this each tick + refresh_partial). The fill
- * shrinks from full toward empty as remaining/total falls. When event_name is
- * non-empty (an event mesh heartbeat is being heard) it replaces the attendee
- * name on the banner's left. Idempotent — repaints its whole region. */
+/* Re-composite a thin countdown fill (and, when with_banner, the name/ID banner)
+ * onto an already-built framebuffer (call identity_screen_draw first, push it as the
+ * partial-refresh base, then call this each tick + refresh_partial). The fill shrinks
+ * from full toward empty as remaining/total falls. with_banner is set only on the
+ * identity frame; text/image frames get the fill alone (no banner over their
+ * content). Idempotent — repaints its whole region. */
 void identity_countdown_overlay(GUI &gui, const char *name, const char *table,
-                                const char *event_name, int remaining_sec,
-                                int total_sec);
+                                bool with_banner, int remaining_sec, int total_sec);
 
 /* Composite a small "asleep" indicator (crescent moon + ascending "z z z") into
  * the top-right corner of an already-built identity frame (call

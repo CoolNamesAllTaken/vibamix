@@ -205,15 +205,30 @@ static bool run_awake_window(void)
 
 	int64_t now = k_uptime_get();
 	int64_t deadline = now + kAwakeMs;
-	bool    event_active = false;
 	int     bar_tick = 0;
 	int     last_remaining = -1;
 	int64_t last_bar_ms = 0;
+	bool    force_rebase = false;   // a deferred render replaced the panel frame
 
-	// A full-screen 4-gray identity image can't be partial-refreshed whole-frame
-	// (that would flatten the gray), so the countdown ticks only the opaque bottom
-	// banner via a region refresh, leaving the gray image above it intact.
-	const bool gray = s_mesh.identity_is_gray();
+	// The countdown bar overlays whatever frame is on the panel — identity, or a text
+	// or image frame pushed mid-window — so every non-config frame auto-sleeps on the
+	// deadline unless event heartbeats keep it awake. A full-screen 4-gray frame can't
+	// be partial-refreshed whole-frame (that would flatten the gray), so over a gray
+	// frame the bar holds static (no live tick) and the window runs purely on the
+	// deadline; 1-bit frames tick the opaque bottom banner via a region refresh.
+	// Re-read after each content render below, since the frame (and its gray-ness) changes.
+	bool gray = s_mesh.current_frame_is_gray();
+
+	// The name/ID banner is drawn only on the identity frame; text/image frames get the
+	// bare countdown fill so their content isn't covered. Re-read after a content render.
+	bool on_identity = s_mesh.current_frame_is_identity();
+
+	// Take ownership of the panel: while this loop runs, mesh content commands
+	// (arriving on the BT thread) must NOT render the ePaper themselves — that races
+	// this thread's countdown refresh and wedges the panel, after which the button is
+	// never serviced. Defer them to consume_pending_render() below. Set before the
+	// first wake() so there's no window where the main loop drives the panel undeferred.
+	s_mesh.set_defer_renders(true);
 
 	// Wake the panel for the partial-refresh countdown ticks (the identity redraw
 	// left it asleep after its full-refresh baseline draw).
@@ -224,15 +239,28 @@ static bool run_awake_window(void)
 		if (event_status_consume_heartbeat())
 		{
 			deadline = now + kAwakeMs;
-			event_active = true;
+		}
+
+		// Render any mesh content staged on the BT thread, on THIS thread, so the
+		// panel stays single-threaded. The render left a new frame on the panel and
+		// the panel asleep, so re-wake for the partial ticks and re-base the bar
+		// (set_base_map) on the next tick rather than partial-refreshing over a stale base.
+		if (s_mesh.consume_pending_render())
+		{
+			s_gui.wake();
+			gray = s_mesh.current_frame_is_gray();   // the new frame may be 1-bit or 4-gray
+			on_identity = s_mesh.current_frame_is_identity();
+			force_rebase = true;
+			last_remaining = -1;
+			last_bar_ms = 0;
 		}
 
 		// (LEDs animate on their own thread; see LEDStrip::init.)
 
-		// A full-screen 4-gray identity is static — its banner is baked into the gray
-		// render and a 1-bit partial can't run over it, so there's no live bar to
-		// tick (heartbeats/button/timeout below still drive the window). The 1-bit
-		// identity repaints its countdown bar ~1 Hz (flash-free partial refresh).
+		// A full-screen 4-gray frame is static — a 1-bit partial can't run over it, so
+		// there's no live bar to tick (heartbeats/button/timeout below still drive the
+		// window). A 1-bit frame repaints its countdown bar ~1 Hz (flash-free partial
+		// refresh) — with the name/ID banner only on the identity frame (on_identity).
 		if (!gray && now - last_bar_ms >= 1000)
 		{
 			last_bar_ms = now;
@@ -241,10 +269,14 @@ static bool run_awake_window(void)
 			{
 				last_remaining = remaining;
 				identity_countdown_overlay(
-					s_gui, id_name, id_table,
-					event_active ? event_status_name() : "",
+					s_gui, id_name, id_table, on_identity,
 					remaining, kAwakeTotalSec);
-				if (++bar_tick % kBarFullRefreshEvery == 0)
+				if (force_rebase)
+				{
+					force_rebase = false;
+					s_gui.set_base_map();
+				}
+				else if (++bar_tick % kBarFullRefreshEvery == 0)
 				{
 					s_gui.set_base_map();
 				}
@@ -257,6 +289,11 @@ static bool run_awake_window(void)
 
 		k_sleep(K_MSEC(LEDStrip::kFrameMs));
 	}
+
+	// Leaving the window (button or timeout): stop deferring and drop any work staged
+	// after the last drain, so a stale mesh frame can't render once config mode or
+	// deep-sleep owns the panel.
+	s_mesh.set_defer_renders(false);
 	return s_btn_event;
 }
 

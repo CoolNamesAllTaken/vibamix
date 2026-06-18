@@ -349,18 +349,18 @@ void identity_banner_over(GUI &gui, const char *name, const char *table)
 }
 
 void identity_countdown_overlay(GUI &gui, const char *name, const char *table,
-                                const char *event_name, int remaining_sec,
-                                int total_sec)
+                                bool with_banner, int remaining_sec, int total_sec)
 {
     uint8_t *fb = gui.framebuffer();
 
-    // Re-bind Paint to the already-built identity frame without clearing it, then
-    // repaint only the bottom banner + countdown fill. When an event mesh is
-    // connected the banner's left text is the event name; otherwise the attendee
-    // name. Idempotent, so repeated partial refreshes don't smear.
+    // Re-bind Paint to the already-built frame without clearing it, then repaint the
+    // countdown fill (and, only on the identity frame, the name/ID banner). Text and
+    // image frames get just the thin fill so their content isn't covered by a banner.
+    // Idempotent, so repeated partial refreshes don't smear.
     Paint_NewImage(fb, EPD_WIDTH, EPD_HEIGHT, ROTATE_270, WHITE);
-    const char *left = (event_name && event_name[0]) ? event_name : name;
-    draw_identity_banner(left, table);
+    if (with_banner) {
+        draw_identity_banner(name, table);
+    }
     draw_identity_countdown(remaining_sec, total_sec);
 }
 

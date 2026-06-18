@@ -21,10 +21,11 @@ GROUP_ADDR = 0xC000           # "all badges" subscription group
 COMPANY_ID = 0x0059
 
 # --- Vendor model opcodes (the 0xNN in BT_MESH_MODEL_OP_3(0xNN, CID)) ---
-# Mesh is the BROADCAST/EPHEMERAL surface: it overrides live state on every badge
-# and never stores anything. Per-badge persistent config is GATT-only (below).
-# (0x01/0x02/0x0A/0x0B/0x0C — set name/fun-fact/display-stored/attendee/frame-LED —
-# were removed; that config moved to GATT.)
+# Mesh is the BROADCAST surface for every badge at once. Most ops are ephemeral
+# (override live state, store nothing); OP_DISPLAY is the exception — it transfers
+# no content, it just tells every badge to show a frame it already has stored.
+# Per-badge persistent *content* is GATT-only (below). (0x01/0x02/0x0B/0x0C —
+# set name/fun-fact/attendee/frame-LED — were removed; that config moved to GATT.)
 OP_SET_LED = 0x03         # anim, r, g, b   (live LED override, not stored)
 OP_IMG_START = 0x04       # le16 size, w, h (render-only image, not stored)
 OP_IMG_DATA = 0x05        # le16 off, bytes
@@ -32,6 +33,7 @@ OP_IMG_END = 0x06         # le32 crc
 OP_HEARTBEAT = 0x07       # optional UTF-8 event name (<=8 bytes, keeps it unsegmented)
 OP_SHOW_TEXT_HDR = 0x08   # title           (draw text frame, not stored)
 OP_SHOW_TEXT_BODY = 0x09  # seq, last, body
+OP_DISPLAY = 0x0A         # kind, idx       (show an already-stored frame on all badges)
 
 # LED animation codes (mirror enum LedPattern in firmware src/LEDStrip.h).
 ANIM_OFF = 0
@@ -63,7 +65,7 @@ def _u(short: int) -> str:
 
 
 UUID_CFG_SVC = _u(0x0001)
-UUID_CHR_IMAGE = _u(0x0002)      # render-only 1bpp image (quick render, not stored)
+# (f0de0002 is the firmware's render-only 1bpp "quick render" char — unused by badgectl.)
 # One read/write characteristic per frame type. Each carries the whole frame and
 # folds in a "display now" op. Write is tagged by a leading op byte (GOP_*); read
 # is preceded by GOP_SELECT (which serializes the frame on the badge).

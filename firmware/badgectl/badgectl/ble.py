@@ -209,12 +209,6 @@ class BadgeLink:
                 on_progress(off, n)
         await self._w(uuid, bytes([keys.GOP_END]) + struct.pack("<I", crc))
 
-    async def upload_image(self, fb: bytes, on_progress=None) -> None:
-        """Quick render (f0de0002): draw a 1bpp image now, not stored."""
-        crc = zlib.crc32(fb) & 0xFFFFFFFF
-        start = bytes([keys.GOP_START]) + _le16(len(fb)) + _le16(176) + _le16(264)
-        await self._upload(keys.UUID_CHR_IMAGE, start, fb, crc, on_progress)
-
     # -- identity frame (f0de0003) --
     async def write_identity_meta(self, name: str, id_str: str,
                                   anim: int, r: int, g: int, b: int) -> None:

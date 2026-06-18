@@ -12,7 +12,8 @@ default. Treat it as authoritative for anything under `firmware/vibamix_zephyr/`
   - `bootloader/` — custom direct-XIP A/B first-stage bootloader (flashed once over SWD).
   - `common/` — headers shared by the app **and** the bootloader (`vbx_img.h` trailer, `bl_state.*`).
   - `peripherals/` — out-of-app driver libs (ePaper `epd/`, `qrcodegen/`) pulled in via `add_subdirectory`.
-  - `badgectl/` — PyQt6 laptop tool: GATT config, mesh proxy-client, **BLE OTA**.
+  - `badgectl/` — PyQt6 laptop tool: GATT config, mesh-TX gateway client (inject mesh via the
+    `f0de000C` char on a config-mode badge), **BLE OTA**.
   - `flashtool/` — bulk USB flashing utility.
   - `scripts/` — misc helper scripts (e.g. J-Link GDB server).
 - `kicad/` — hardware (the `vibamix_xiao` carrier PCB).

@@ -43,6 +43,15 @@ void GUI::show_hello_world()
     printk("ePaper hello world displayed\n");
 }
 
+void GUI::show_blank()
+{
+    Paint_NewImage(m_image, EPD_WIDTH, EPD_HEIGHT, ROTATE_270, WHITE);
+    Paint_Clear(WHITE);
+    gateway_status_overlay(m_image);  // mesh-gateway banner (no-op unless relaying)
+    EPD_Display(m_image);  // EPD_Display already triggers a full refresh internally
+    printk("ePaper blank displayed\n");
+}
+
 void GUI::show_text(const char *name, const char *body)
 {
     Paint_NewImage(m_image, EPD_WIDTH, EPD_HEIGHT, ROTATE_270, WHITE);

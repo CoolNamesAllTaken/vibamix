@@ -17,6 +17,7 @@
 #include <zephyr/bluetooth/mesh.h>
 #include <zephyr/drivers/hwinfo.h>
 #include <zephyr/settings/settings.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/crc.h>
 #include <zephyr/sys/printk.h>
@@ -27,6 +28,44 @@ static MeshNode *s_self;
 // Reassembly/staging buffer for one image at a time (2-bit gray = 11616 B, 1-bit
 // = 5808 B). image_xfer reassembles into this; display reads slots into it too.
 static uint8_t s_img_stage[12288];
+
+// ---- deferred content rendering (cold-boot "mesh mode" awake window) ----
+//
+// During run_awake_window() the MAIN thread owns the ePaper (countdown bar). Mesh
+// content commands (show-text / image / display-screen) arrive on the BT RX thread;
+// rendering them there races the main thread on the shared panel + BUSY line and
+// wedges it (Epaper_READBUSY then spins, so the main loop never re-checks the button
+// and a press is ignored until reboot). So while deferral is on, the handlers only
+// stage the work + set a flag; run_awake_window() drains it via
+// consume_pending_render() on the main thread, keeping the panel single-threaded.
+// This mirrors ConfigMode's identical BT-thread-must-not-render deferral.
+static atomic_t s_defer_renders;
+static atomic_t s_text_pending;
+static atomic_t s_image_pending;
+static atomic_t s_display_pending;
+
+// Staged show-text (copied out of the mesh reassembly buffer, which is reused).
+static char s_ptext_hdr[APP_CFG_HEADER_MAX];
+static char s_ptext_body[APP_CFG_BODY_MAX];
+
+// Staged image: a ping-pong of two render buffers (as ConfigMode). on_image's source
+// is the live image_xfer reassembly buffer, which a next transfer overwrites, so the
+// pixels must be copied out; the BT thread fills whichever buffer the main thread
+// isn't rendering. Not reusing s_img_stage avoids clobbering an unrendered frame.
+struct pending_img {
+    uint8_t  slot, fmt;
+    uint16_t w, h;
+    uint32_t len;
+};
+static uint8_t            s_mesh_render_buf[2][BADGE_IMG_GRAY2_BYTES];
+static struct pending_img s_pimg[2];
+static volatile int8_t    s_next_buf;            // BT: buffer to fill next
+static volatile int8_t    s_rendering_buf = -1;  // main: buffer in use (-1 = idle)
+static volatile int8_t    s_pending_buf;         // buffer holding the pending image
+
+// Staged display-screen: kind/idx only — on_display_screen reads stored content from
+// flash/app_config on the main thread, so no pixel copy is needed.
+static uint8_t s_pd_kind, s_pd_idx;
 
 // Per-device provisioning UUID, derived from the FICR device id.
 static uint8_t s_dev_uuid[16];
@@ -61,12 +100,28 @@ static void cb_show_text(const char *title, size_t tlen, const char *body, size_
     if (s_self) { s_self->on_show_text(title, tlen, body, blen); }
 }
 
+static void cb_display_screen(uint8_t kind, uint8_t idx)
+{
+    // Mesh broadcast "show stored frame N". A gateway badge receives its own
+    // re-originated broadcast back via mesh loopback — it must NOT render it (it
+    // stays on the Mesh Gateway screen) and just notes the relay, exactly like
+    // cb_show_text. Remote badges render the stored frame (the shared handler also
+    // persists the displayed-frame selection) and stay awake.
+    if (gateway_status_active()) {
+        gateway_status_note(GW_CMD_DISPLAY);
+        return;
+    }
+    if (s_self) { s_self->on_display_screen(kind, idx); }
+    config_mode_on_content();
+}
+
 } // extern "C"
 
 static const struct mesh_config_handlers s_handlers = {
     .heartbeat = cb_heartbeat,
     .show_led  = cb_show_led,
     .show_text = cb_show_text,
+    .display_screen = cb_display_screen,
 };
 
 int MeshNode::init(GUI *gui, LEDStrip *leds)
@@ -155,8 +210,6 @@ int MeshNode::init(GUI *gui, LEDStrip *leds)
 
 void MeshNode::apply_persisted_config()
 {
-    const struct app_config *cfg = app_config_get();
-
     // The identity frame is home: apply its LED (animation + color) on boot.
     apply_frame_led(APP_DISP_KIND_IDENTITY, 0);
 
@@ -164,13 +217,10 @@ void MeshNode::apply_persisted_config()
     if (!m_gui) {
         return;
     }
-    if (cfg->has_name) {
-        redraw_identity();
-    } else {
-        // First boot, nothing configured yet.
-        m_gui->show_hello_world();
-        m_gui->sleep();
-    }
+    // Even with nothing configured yet, rest on a clean identity frame (cleared
+    // white background + banner, which falls back to "vibamix" when the name is
+    // empty) rather than a "Hello World" placeholder.
+    redraw_identity();
 }
 
 void MeshNode::redraw_identity(bool sleeping)
@@ -197,7 +247,8 @@ void MeshNode::redraw_identity(bool sleeping)
 #else
     const bool use_gray = false;
 #endif
-    m_identity_gray = use_gray;
+    m_current_gray = use_gray;
+    m_current_is_identity = true;
 
     m_gui->wake();
     if (use_gray) {
@@ -212,7 +263,7 @@ void MeshNode::redraw_identity(bool sleeping)
         // Full-screen B/W identity image + banner. A B/W image is already in panel-
         // framebuffer layout, so blit it straight in (like render_image), then draw the
         // banner over its bottom. 1-bit throughout -> the awake window keeps the live
-        // countdown (m_identity_gray stays false).
+        // countdown (m_current_gray stays false).
         memcpy(m_gui->framebuffer(), img, len);
         identity_banner_over(*m_gui, cfg->name, table);
         if (sleeping) {
@@ -277,6 +328,22 @@ void MeshNode::on_show_text(const char *title, size_t tlen, const char *body, si
         gateway_status_note(GW_CMD_SCREEN);
         return;
     }
+    if (atomic_get(&s_defer_renders)) {
+        // Awake window: stage for the main thread (see deferral note above).
+        strncpy(s_ptext_hdr, title ? title : "", sizeof(s_ptext_hdr) - 1);
+        s_ptext_hdr[sizeof(s_ptext_hdr) - 1] = '\0';
+        strncpy(s_ptext_body, body ? body : "", sizeof(s_ptext_body) - 1);
+        s_ptext_body[sizeof(s_ptext_body) - 1] = '\0';
+        atomic_set(&s_text_pending, 1);
+        return;
+    }
+    do_show_text(title, body);
+}
+
+void MeshNode::do_show_text(const char *title, const char *body)
+{
+    m_current_gray = false;   // text is 1-bit; awake window can tick a live bar over it
+    m_current_is_identity = false;
     m_gui->wake();
     m_gui->show_text(title, body);
     m_gui->sleep();
@@ -324,6 +391,33 @@ void MeshNode::on_set_frame_led(uint8_t kind, uint8_t idx, uint8_t anim,
 void MeshNode::on_image(uint8_t slot, uint8_t fmt, const uint8_t *buf, size_t len,
                         uint16_t w, uint16_t h)
 {
+    if (atomic_get(&s_defer_renders)) {
+        // Awake window: copy the pixels into the idle ping-pong buffer + stage for
+        // the main thread (the source is the live reassembly buffer; see above).
+        if (len > BADGE_IMG_GRAY2_BYTES) {
+            return;   // larger than a panel frame; shouldn't happen, drop it
+        }
+        int idx = s_next_buf;
+        if (idx == s_rendering_buf) {
+            idx ^= 1;
+        }
+        memcpy(s_mesh_render_buf[idx], buf, len);
+        s_pimg[idx].slot = slot;
+        s_pimg[idx].fmt  = fmt;
+        s_pimg[idx].w    = w;
+        s_pimg[idx].h    = h;
+        s_pimg[idx].len  = (uint32_t)len;
+        s_pending_buf = idx;
+        s_next_buf    = idx ^ 1;
+        atomic_set(&s_image_pending, 1);
+        return;
+    }
+    do_image(slot, fmt, buf, len, w, h);
+}
+
+void MeshNode::do_image(uint8_t slot, uint8_t fmt, const uint8_t *buf, size_t len,
+                        uint16_t w, uint16_t h)
+{
     // Identity image: store it, then recompose the identity frame (banner + image)
     // rather than blitting it full-screen.
     if (slot == BADGE_SLOT_IDENTITY) {
@@ -338,6 +432,8 @@ void MeshNode::on_image(uint8_t slot, uint8_t fmt, const uint8_t *buf, size_t le
         badge_store_image_write(slot, fmt, buf, len, w, h, crc);
         app_config_set_display(APP_DISP_KIND_IMAGE, slot);
     }
+    m_current_gray = (fmt == BADGE_FMT_GRAY2);
+    m_current_is_identity = false;
     if (m_gui) {
         m_gui->wake();
         if (fmt == BADGE_FMT_GRAY2) {
@@ -372,6 +468,18 @@ void MeshNode::on_display_screen(uint8_t kind, uint8_t idx)
         config_mode_on_content();
     }
 
+    if (atomic_get(&s_defer_renders)) {
+        // Awake window: stage for the main thread (stored content read there).
+        s_pd_kind = kind;
+        s_pd_idx  = idx;
+        atomic_set(&s_display_pending, 1);
+        return;
+    }
+    do_display_screen(kind, idx);
+}
+
+void MeshNode::do_display_screen(uint8_t kind, uint8_t idx)
+{
     if (kind == APP_DISP_KIND_IDENTITY) {
         redraw_identity();
         app_config_set_display(APP_DISP_KIND_IDENTITY, 0);
@@ -385,6 +493,8 @@ void MeshNode::on_display_screen(uint8_t kind, uint8_t idx)
             printk("display: text screen %u empty\n", idx);
             return;
         }
+        m_current_gray = false;   // text is 1-bit; awake window ticks a live bar over it
+        m_current_is_identity = false;
         m_gui->wake();
         m_gui->show_text(scr->header, scr->body);
         m_gui->sleep();
@@ -398,9 +508,19 @@ void MeshNode::on_display_screen(uint8_t kind, uint8_t idx)
 
         if (badge_store_image_read(idx, s_img_stage, sizeof(s_img_stage),
                                    &fmt, &len, &w, &h) != 0) {
-            printk("display: image slot %u empty\n", idx);
+            // Empty slot: clear the bistable panel to blank white rather than
+            // leaving the previously-shown image frozen on it.
+            printk("display: image slot %u empty - clearing panel\n", idx);
+            m_current_gray = false;   // blank is 1-bit
+            m_current_is_identity = false;
+            m_gui->wake();
+            m_gui->show_blank();
+            m_gui->sleep();
+            app_config_set_has_image(false);
             return;
         }
+        m_current_gray = (fmt == BADGE_FMT_GRAY2);
+        m_current_is_identity = false;
         m_gui->wake();
         if (fmt == BADGE_FMT_GRAY2) {
             m_gui->render_gray2(s_img_stage, w, h);
@@ -412,4 +532,38 @@ void MeshNode::on_display_screen(uint8_t kind, uint8_t idx)
         app_config_set_has_image(true);
         apply_frame_led(kind, idx);
     }
+}
+
+void MeshNode::set_defer_renders(bool on)
+{
+    atomic_set(&s_defer_renders, on ? 1 : 0);
+    if (!on) {
+        // Leaving the awake window: drop any work staged after the last drain so a
+        // stale frame can't render later (e.g. once config mode owns the panel).
+        atomic_clear(&s_text_pending);
+        atomic_clear(&s_image_pending);
+        atomic_clear(&s_display_pending);
+    }
+}
+
+bool MeshNode::consume_pending_render()
+{
+    bool rendered = false;
+    if (atomic_cas(&s_text_pending, 1, 0)) {
+        do_show_text(s_ptext_hdr, s_ptext_body);
+        rendered = true;
+    }
+    if (atomic_cas(&s_image_pending, 1, 0)) {
+        int idx = s_pending_buf;
+        s_rendering_buf = idx;   // tells the BT thread to fill the other buffer
+        const struct pending_img p = s_pimg[idx];
+        do_image(p.slot, p.fmt, s_mesh_render_buf[idx], p.len, p.w, p.h);
+        s_rendering_buf = -1;
+        rendered = true;
+    }
+    if (atomic_cas(&s_display_pending, 1, 0)) {
+        do_display_screen(s_pd_kind, s_pd_idx);
+        rendered = true;
+    }
+    return rendered;
 }

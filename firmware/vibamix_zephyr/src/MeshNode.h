@@ -33,10 +33,20 @@ public:
     // into the corner before the refresh.
     void redraw_identity(bool sleeping = false);
 
-    // True if the last redraw_identity() rendered a full-screen 4-gray image (so the
-    // awake-window countdown must use the banner-region refresh, not a whole-frame
-    // partial which would flatten the gray). Set by redraw_identity().
-    bool identity_is_gray() const { return m_identity_gray; }
+    // True if the frame currently on the panel (identity, text, or image — whatever
+    // was rendered last) is a full-screen 4-gray image. The awake-window countdown
+    // uses this to decide whether it can tick a 1-bit overlay bar over the frame (it
+    // can't over a 4-gray base — that would re-drive every mid-gray pixel); a 4-gray
+    // frame instead holds static and auto-sleeps purely on the deadline/heartbeat.
+    // Set by every render path (redraw_identity / do_show_text / do_image /
+    // do_display_screen) so the bar adapts when content takes over mid-window.
+    bool current_frame_is_gray() const { return m_current_gray; }
+
+    // True if the frame currently on the panel is the identity frame (vs a text or
+    // image frame). The awake-window countdown draws the name/ID banner only on the
+    // identity frame; other frames get the bare countdown fill. Set by every render
+    // path alongside m_current_gray.
+    bool current_frame_is_identity() const { return m_current_is_identity; }
 
     // Called by file-scope C trampolines; not for external use.
     //
@@ -65,12 +75,31 @@ public:
     void on_set_frame_led(uint8_t kind, uint8_t idx, uint8_t anim,
                           uint8_t r, uint8_t g, uint8_t b);
 
+    // Deferred rendering for the cold-boot awake window ("mesh mode"). While on, the
+    // content handlers above (show_text / image / display_screen) only stage work on
+    // the BT RX thread instead of driving the ePaper there — which would race the
+    // main thread's countdown refresh and wedge the panel (killing the button).
+    // run_awake_window() calls consume_pending_render() each iteration to render the
+    // staged work on the main thread. Turning deferral off also drops staged work.
+    void set_defer_renders(bool on);
+    // Render any staged content on the calling (main) thread. Returns true if it
+    // rendered something (caller re-bases its partial-refresh overlay).
+    bool consume_pending_render();
+
 private:
     void apply_frame_led(uint8_t kind, uint8_t idx);
 
+    // Actual ePaper work for the content handlers, split out so it can run either
+    // inline (deferral off) or from consume_pending_render() on the main thread.
+    void do_show_text(const char *title, const char *body);
+    void do_image(uint8_t slot, uint8_t fmt, const uint8_t *buf, size_t len,
+                  uint16_t w, uint16_t h);
+    void do_display_screen(uint8_t kind, uint8_t idx);
+
     GUI      *m_gui{nullptr};
     LEDStrip *m_leds{nullptr};
-    bool      m_identity_gray{false};
+    bool      m_current_gray{false};
+    bool      m_current_is_identity{true};
 };
 
 #endif /* VIBAMIX_MESH_NODE_H */

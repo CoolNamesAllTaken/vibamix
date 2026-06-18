@@ -15,9 +15,11 @@
 #define VIBAMIX_CID      CONFIG_BT_COMPANY_ID
 #define VIBAMIX_MODEL_ID 0x0001
 
-/* Vendor opcodes (3-byte: 0x_C0_<b0>_<cid>). Broadcast/ephemeral surface only.
- * Opcodes 0x01/0x02/0x0A/0x0B/0x0C (set name/fun-fact/display-stored/attendee/
- * frame-LED) were removed — that config is now GATT-only. */
+/* Vendor opcodes (3-byte: 0x_C0_<b0>_<cid>). Broadcast surface. Most are ephemeral
+ * (draw/override live state, store nothing); DISPLAY is the exception — it carries
+ * no content, just tells every badge to show a frame it already has stored.
+ * Opcodes 0x01/0x02/0x0B/0x0C (set name/fun-fact/attendee/frame-LED) were removed —
+ * that stored config is now GATT-only. */
 #define OP_SET_LED       BT_MESH_MODEL_OP_3(0x03, VIBAMIX_CID) /* anim,r,g,b (live, not stored) */
 #define OP_IMG_START     BT_MESH_MODEL_OP_3(0x04, VIBAMIX_CID) /* le16 size,w,h */
 #define OP_IMG_DATA      BT_MESH_MODEL_OP_3(0x05, VIBAMIX_CID) /* le16 off, bytes */
@@ -25,6 +27,7 @@
 #define OP_HEARTBEAT     BT_MESH_MODEL_OP_3(0x07, VIBAMIX_CID) /* empty */
 #define OP_SHOW_TEXT_HDR BT_MESH_MODEL_OP_3(0x08, VIBAMIX_CID) /* title (draw, not stored) */
 #define OP_SHOW_TEXT_BODY BT_MESH_MODEL_OP_3(0x09, VIBAMIX_CID) /* seq,last, body */
+#define OP_DISPLAY       BT_MESH_MODEL_OP_3(0x0A, VIBAMIX_CID) /* kind,idx (show a stored frame) */
 
 static const struct mesh_config_handlers *s_cfg;
 
@@ -154,6 +157,18 @@ static int handle_show_text_body(const struct bt_mesh_model *model,
 	return 0;
 }
 
+static int handle_display(const struct bt_mesh_model *model,
+			  struct bt_mesh_msg_ctx *ctx, struct net_buf_simple *buf)
+{
+	uint8_t kind = net_buf_simple_pull_u8(buf);
+	uint8_t idx = net_buf_simple_pull_u8(buf);
+
+	if (s_cfg && s_cfg->display_screen) {
+		s_cfg->display_screen(kind, idx);
+	}
+	return 0;
+}
+
 static const struct bt_mesh_model_op vibamix_op[] = {
 	{ OP_SET_LED,        BT_MESH_LEN_EXACT(4), handle_set_led },
 	{ OP_IMG_START,      BT_MESH_LEN_EXACT(6), handle_img_start },
@@ -162,6 +177,7 @@ static const struct bt_mesh_model_op vibamix_op[] = {
 	{ OP_HEARTBEAT,      BT_MESH_LEN_MIN(0),   handle_heartbeat },
 	{ OP_SHOW_TEXT_HDR,  BT_MESH_LEN_MIN(0),   handle_show_text_hdr },
 	{ OP_SHOW_TEXT_BODY, BT_MESH_LEN_MIN(2),   handle_show_text_body },
+	{ OP_DISPLAY,        BT_MESH_LEN_EXACT(2), handle_display },
 	BT_MESH_MODEL_OP_END,
 };
 
