@@ -5,6 +5,13 @@
 #include <stdint.h>
 #include "Display_EPD_W21.h"
 
+// Render stored grayscale image slots (and the identity image) in real 4-level gray
+// (SSD1680 custom waveform) instead of dithering to 1bpp. Set to 0 for the dithered
+// B/W path. Declared here so non-GUI code can pick the gray identity render path.
+#ifndef VIBAMIX_EPD_4GRAY
+#define VIBAMIX_EPD_4GRAY 1
+#endif
+
 class GUI {
 public:
     void init();
@@ -24,6 +31,11 @@ public:
     // framebuffer and display it.
     void render_gray2(const uint8_t *src, uint16_t w, uint16_t h);
 
+    // Render a 2-bit grayscale image FULL-SCREEN (4-gray) as the identity base. The
+    // banner is baked into the source before this (see identity_bake_overlays) — a
+    // 1-bit overlay can't run over a 4-gray base.
+    void render_identity_gray(const uint8_t *src, uint16_t w, uint16_t h);
+
     void sleep();
 
     // Full refresh that also sets the partial-refresh baseline (both RAM banks),
@@ -40,6 +52,8 @@ public:
     size_t   framebuffer_size() const { return sizeof(m_image); }
 
 private:
+    void render_gray_full(const uint8_t *src, uint16_t w, uint16_t h);
+
     uint8_t m_image[EPD_WIDTH * EPD_HEIGHT / 8];
 };
 

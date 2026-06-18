@@ -224,11 +224,16 @@ class BadgeLink:
                    + bytes([anim, r, g, b]))
         await self._w(keys.UUID_IDENTITY, payload)
 
-    async def upload_identity_image(self, payload: bytes, on_progress=None) -> None:
-        """Identity-frame image (gray2), drawn behind the name/ID banner."""
+    async def upload_identity_image(self, payload: bytes, fmt: int = keys.FMT_GRAY2,
+                                    on_progress=None) -> None:
+        """Identity-frame image, drawn full-screen behind the name/ID banner.
+
+        fmt = FMT_GRAY2 (2-bit, 264x176, 11616 B) or FMT_BW (1-bit panel framebuffer,
+        176x264, 5808 B). Dims match the slot-image convention per format."""
         crc = zlib.crc32(payload) & 0xFFFFFFFF
-        start = (bytes([keys.GOP_START, keys.FMT_GRAY2])
-                 + _le16(len(payload)) + _le16(264) + _le16(176))
+        w, h = (176, 264) if fmt == keys.FMT_BW else (264, 176)
+        start = (bytes([keys.GOP_START, fmt])
+                 + _le16(len(payload)) + _le16(w) + _le16(h))
         await self._upload(keys.UUID_IDENTITY, start, payload, crc, on_progress)
 
     async def read_identity(self, want_pixels: bool = False, on_progress=None) -> dict:

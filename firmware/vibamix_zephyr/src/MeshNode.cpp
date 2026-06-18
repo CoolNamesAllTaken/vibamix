@@ -12,6 +12,7 @@
 #include "qr_screen.h"
 
 #include <stdio.h>
+#include <string.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/mesh.h>
 #include <zephyr/drivers/hwinfo.h>
@@ -173,13 +174,42 @@ void MeshNode::redraw_identity(bool sleeping)
         img = s_img_stage;
     }
 
+    const char *table = cfg->has_attendee ? cfg->attendee_id : "";
+
+#if VIBAMIX_EPD_4GRAY
+    const bool use_gray = (img && fmt == BADGE_FMT_GRAY2 && w > 0 && h > 0);
+#else
+    const bool use_gray = false;
+#endif
+    m_identity_gray = use_gray;
+
     m_gui->wake();
-    identity_screen_draw(*m_gui, cfg->name, cfg->has_attendee ? cfg->attendee_id : "",
-                         img, fmt, w, h);
-    if (sleeping) {
-        identity_sleep_overlay(*m_gui);   // moon + z z z, so the panel rests "asleep"
+    if (use_gray) {
+        // Full-screen 4-gray identity: bake the opaque banner (+ asleep moon) into the
+        // gray2 source, then render it in one 4-gray pass. (A 1-bit overlay/partial
+        // can't run over a 4-gray base — it re-drives every mid-gray pixel — so the
+        // banner is composited into the image, and the awake window holds it static.)
+        identity_bake_overlays(s_img_stage, w, h, m_gui->framebuffer(),
+                               cfg->name, table, sleeping);
+        m_gui->render_identity_gray(s_img_stage, w, h);
+    } else if (img && fmt == BADGE_FMT_BW && len == m_gui->framebuffer_size()) {
+        // Full-screen B/W identity image + banner. A B/W image is already in panel-
+        // framebuffer layout, so blit it straight in (like render_image), then draw the
+        // banner over its bottom. 1-bit throughout -> the awake window keeps the live
+        // countdown (m_identity_gray stays false).
+        memcpy(m_gui->framebuffer(), img, len);
+        identity_banner_over(*m_gui, cfg->name, table);
+        if (sleeping) {
+            identity_sleep_overlay(*m_gui);
+        }
+        m_gui->set_base_map();
+    } else {
+        identity_screen_draw(*m_gui, cfg->name, table, img, fmt, w, h);
+        if (sleeping) {
+            identity_sleep_overlay(*m_gui);   // moon + z z z, so the panel rests "asleep"
+        }
+        m_gui->set_base_map();   // push the framebuffer to the panel (full refresh)
     }
-    m_gui->set_base_map();   // push the framebuffer to the panel (full refresh)
     m_gui->sleep();
 }
 

@@ -481,14 +481,21 @@ class MainWindow(QMainWindow):
 
         v.addWidget(self._led_group("id", keys.DISP_KIND_IDENTITY, lambda: 0))
 
-        g = QGroupBox("Identity image (gray2, fills the frame behind the name/ID banner)")
+        g = QGroupBox("Identity image (fills the frame behind the name/ID banner)")
         gl = QGridLayout(g)
+        self.g_idimg_fmt = QComboBox()
+        self.g_idimg_fmt.addItem("2-bit grayscale", keys.FMT_GRAY2)
+        self.g_idimg_fmt.addItem("1-bit B/W", keys.FMT_BW)
+        self.g_idimg_fmt.currentIndexChanged.connect(
+            lambda: self._reload_image(self.g_idimg_path, self.g_idimg_preview,
+                                       self._idimg_fmt_name(), "_idimg", True))
         self.g_idimg_path = QLineEdit()
         self.g_idimg_path.setReadOnly(True)
         ibrowse = QPushButton("Browse…")
         ibrowse.setObjectName("ghost")
         ibrowse.clicked.connect(
-            lambda: self._pick_image(self.g_idimg_path, self.g_idimg_preview, "gray2", "_idimg", True))
+            lambda: self._pick_image(self.g_idimg_path, self.g_idimg_preview,
+                                     self._idimg_fmt_name(), "_idimg", True))
         self.g_idimg_preview = QLabel()
         self.g_idimg_preview.setFixedSize(264, 176)
         self.g_idimg_preview.setStyleSheet("background:#11141a;border:1px solid #3a3f4b;border-radius:6px;")
@@ -498,12 +505,14 @@ class MainWindow(QMainWindow):
         idload.clicked.connect(lambda: self._go(self._load_identity_pixels()))
         iup = QPushButton("Upload")
         iup.clicked.connect(lambda: self._go(self._upload_identity_image()))
-        gl.addWidget(self.g_idimg_path, 0, 0)
-        gl.addWidget(ibrowse, 0, 1)
-        gl.addWidget(self.g_idimg_preview, 1, 0, 1, 2, Qt.AlignmentFlag.AlignHCenter)
-        gl.addWidget(self.g_idimg_prog, 2, 0, 1, 2)
-        gl.addWidget(idload, 3, 0)
-        gl.addWidget(iup, 3, 1)
+        gl.addWidget(QLabel("Format"), 0, 0)
+        gl.addWidget(self.g_idimg_fmt, 0, 1)
+        gl.addWidget(self.g_idimg_path, 1, 0)
+        gl.addWidget(ibrowse, 1, 1)
+        gl.addWidget(self.g_idimg_preview, 2, 0, 1, 2, Qt.AlignmentFlag.AlignHCenter)
+        gl.addWidget(self.g_idimg_prog, 3, 0, 1, 2)
+        gl.addWidget(idload, 4, 0)
+        gl.addWidget(iup, 4, 1)
         v.addWidget(g)
 
         row = QHBoxLayout()
@@ -664,6 +673,9 @@ class MainWindow(QMainWindow):
     def _slot_fmt_name(self) -> str:
         return "bw" if self.g_slot_fmt.currentData() == keys.FMT_BW else "gray2"
 
+    def _idimg_fmt_name(self) -> str:
+        return "bw" if self.g_idimg_fmt.currentData() == keys.FMT_BW else "gray2"
+
     def _pick_image(self, path_edit, preview, fmt, attr, _is_gatt) -> None:
         fn, _ = QFileDialog.getOpenFileName(self, "Pick image", "", "Images (*.png *.jpg *.jpeg *.bmp *.gif)")
         if not fn:
@@ -745,9 +757,11 @@ class MainWindow(QMainWindow):
         if not self._idimg:
             self._log("Pick an identity image first.")
             return
-        self._log("Uploading identity image (gray2) …")
+        fmt = self.g_idimg_fmt.currentData()
+        self._log(f"Uploading identity image ({'BW' if fmt == keys.FMT_BW else 'gray2'}) …")
         await self.link.upload_identity_image(
-            self._idimg, on_progress=lambda d, n: self.g_idimg_prog.setValue(int(d * 100 / n))
+            self._idimg, fmt,
+            on_progress=lambda d, n: self.g_idimg_prog.setValue(int(d * 100 / n))
         )
         self._log("Identity image stored; identity frame redrawn.")
 

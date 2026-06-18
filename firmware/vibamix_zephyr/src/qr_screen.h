@@ -37,6 +37,11 @@ void config_screen_connected(GUI &gui, const char *name, const char *table,
 void identity_screen_draw(GUI &gui, const char *name, const char *table,
                           const uint8_t *img, uint8_t img_fmt,
                           uint16_t img_w, uint16_t img_h);
+
+/* Draw the bottom name/ID banner over an already-filled framebuffer WITHOUT clearing
+ * it (e.g. a full-screen B/W identity image blitted in). 1-bit, so it supports the
+ * live awake-window countdown. */
+void identity_banner_over(GUI &gui, const char *name, const char *table);
 void identity_status_screen_draw(GUI &gui, const char *name, const char *table,
                                  int batt_mv, int batt_pct,
                                  int remaining_sec, int total_sec);
@@ -57,5 +62,13 @@ void identity_countdown_overlay(GUI &gui, const char *name, const char *table,
  * white halos so it reads over a blank corner or a dark identity image. Used to
  * leave the bistable panel showing the badge is in deep sleep. */
 void identity_sleep_overlay(GUI &gui);
+
+/* Bake the bottom name/ID banner (opaque) and, if sleeping, the asleep moon, into a
+ * 2-bit grayscale source image, so a single 4-gray render shows the full-screen image
+ * with the banner/moon over it. `scratch` is a 1-bit work framebuffer (the GUI
+ * framebuffer), overwritten. Used by the gray-identity path (a 1-bit partial overlay
+ * can't run over a 4-gray base). */
+void identity_bake_overlays(uint8_t *src, uint16_t w, uint16_t h, uint8_t *scratch,
+                            const char *name, const char *table, bool sleeping);
 
 #endif /* VIBAMIX_QR_SCREEN_H */

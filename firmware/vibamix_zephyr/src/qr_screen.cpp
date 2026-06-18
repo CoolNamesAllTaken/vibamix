@@ -264,7 +264,9 @@ static void draw_gray2_fit(const uint8_t *src, int sw, int sh,
 
 // Height of the bottom name/ID banner on the identity frame, and the thin
 // countdown fill pinned to the very bottom edge (drawn within the banner).
-static constexpr int kIdBannerH = 30;
+// 32 (not 30) so the banner is exactly 4 panel byte-columns (canvas y 144..175 ->
+// cols 18..21) — lets the gray-identity path region-refresh it on whole-byte bounds.
+static constexpr int kIdBannerH = 32;
 static constexpr int kIdFillH   = 4;
 
 // Bottom banner: a solid black strip across the screen bottom with `left` (the
@@ -335,6 +337,17 @@ void identity_screen_draw(GUI &gui, const char *name, const char *table,
     gateway_status_overlay(fb);
 }
 
+void identity_banner_over(GUI &gui, const char *name, const char *table)
+{
+    uint8_t *fb = gui.framebuffer();
+
+    // Bind Paint to the already-filled framebuffer (a full-screen B/W identity image
+    // blitted in) WITHOUT clearing, then draw the opaque banner over its bottom.
+    Paint_NewImage(fb, EPD_WIDTH, EPD_HEIGHT, ROTATE_270, WHITE);
+    draw_identity_banner(name, table);
+    gateway_status_overlay(fb);   // "Connected" strip when force-displayed (else no-op)
+}
+
 void identity_countdown_overlay(GUI &gui, const char *name, const char *table,
                                 const char *event_name, int remaining_sec,
                                 int total_sec)
@@ -351,16 +364,11 @@ void identity_countdown_overlay(GUI &gui, const char *name, const char *table,
     draw_identity_countdown(remaining_sec, total_sec);
 }
 
-void identity_sleep_overlay(GUI &gui)
+// The "asleep" indicator (top-right): a crescent moon with three ascending z's to
+// its left. Drawn into the currently-bound Paint framebuffer. White halos/backgrounds
+// keep it legible over a blank corner or a dark image.
+static void draw_sleep_indicator(void)
 {
-    uint8_t *fb = gui.framebuffer();
-
-    // Re-bind Paint to the already-built identity frame without clearing it, then
-    // composite a small "asleep" indicator into the top-right corner: a crescent
-    // moon with three ascending z's to its left. Drawn with white halos/backgrounds
-    // so it stays legible whether the corner is blank or under a dark image.
-    Paint_NewImage(fb, EPD_WIDTH, EPD_HEIGHT, ROTATE_270, WHITE);
-
     // Three ascending z's (small mono font, white box behind each for legibility).
     Paint_DrawString_EN(202, 26, "z", &Font12, WHITE, BLACK);
     Paint_DrawString_EN(212, 17, "z", &Font12, WHITE, BLACK);
@@ -372,6 +380,72 @@ void identity_sleep_overlay(GUI &gui)
     Paint_DrawCircle(mx, my, r + 2, WHITE, DRAW_FILL_FULL, DOT_PIXEL_1X1);
     Paint_DrawCircle(mx, my, r, BLACK, DRAW_FILL_FULL, DOT_PIXEL_1X1);
     Paint_DrawCircle(mx + 5, my - 4, r, WHITE, DRAW_FILL_FULL, DOT_PIXEL_1X1);
+}
+
+void identity_sleep_overlay(GUI &gui)
+{
+    uint8_t *fb = gui.framebuffer();
+
+    // Re-bind Paint to the already-built identity frame without clearing it, then
+    // composite the asleep indicator into the top-right corner.
+    Paint_NewImage(fb, EPD_WIDTH, EPD_HEIGHT, ROTATE_270, WHITE);
+    draw_sleep_indicator();
+}
+
+// Set the 2-bit grayscale level (0..3) of source pixel (x,y) in a w-wide image.
+static inline void gray2_set_level(uint8_t *src, uint16_t w, int x, int y, uint8_t level)
+{
+    const uint32_t pi = (uint32_t)y * w + x;
+    const uint8_t  shift = (uint8_t)((3 - (pi & 3)) * 2);
+    src[pi >> 2] = (uint8_t)((src[pi >> 2] & ~(0x3 << shift)) | (level << shift));
+}
+
+// Bake the bottom name/ID banner (opaque) and, if sleeping, the asleep moon (black
+// overlay) into a 2-bit grayscale source, so a single 4-gray render shows the
+// full-screen image with the banner/moon over it (a 1-bit partial overlay can't run
+// over a 4-gray base — it would re-drive every mid-gray pixel). `scratch` is a 1-bit
+// work framebuffer (the GUI framebuffer); it is overwritten. Scratch pixels are read
+// via the ROTATE_270 mapping that matches gray2_to_plane / Paint.
+void identity_bake_overlays(uint8_t *src, uint16_t w, uint16_t h, uint8_t *scratch,
+                            const char *name, const char *table, bool sleeping)
+{
+    if (!src || w == 0 || h == 0) {
+        return;
+    }
+    const int cw = (w < kCanvasW) ? (int)w : kCanvasW;
+    const int ch = (h < kCanvasH) ? (int)h : kCanvasH;
+    const int wbyte = EPD_WIDTH / 8;   // 22 bytes per panel row
+
+    // Draw the 1-bit banner (+ moon) into the scratch framebuffer.
+    Paint_NewImage(scratch, EPD_WIDTH, EPD_HEIGHT, ROTATE_270, WHITE);
+    Paint_Clear(WHITE);
+    draw_identity_banner(name, table);
+    if (sleeping) {
+        draw_sleep_indicator();
+    }
+
+    // Opaque banner: every pixel in the bottom strip -> white(3)/black(0).
+    for (int y = kCanvasH - kIdBannerH; y < ch; y++) {
+        for (int x = 0; x < cw; x++) {
+            const int idx = (kCanvasW - 1 - x) * wbyte + (y >> 3);
+            const bool white = scratch[idx] & (0x80 >> (y & 7));
+            gray2_set_level(src, w, x, y, white ? 3 : 0);
+        }
+    }
+
+    // Asleep moon: black-only overlay (leave the gray image where the glyph isn't
+    // black, so we don't stamp a white box over the corner).
+    if (sleeping) {
+        for (int y = 0; y < 44 && y < ch; y++) {
+            for (int x = 198; x < cw; x++) {
+                const int idx = (kCanvasW - 1 - x) * wbyte + (y >> 3);
+                if (scratch[idx] & (0x80 >> (y & 7))) {
+                    continue;   // white -> keep the image
+                }
+                gray2_set_level(src, w, x, y, 0);
+            }
+        }
+    }
 }
 
 void identity_status_screen_draw(GUI &gui, const char *name, const char *table,

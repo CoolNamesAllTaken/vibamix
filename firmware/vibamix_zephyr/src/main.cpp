@@ -207,6 +207,11 @@ static bool run_awake_window(void)
 	int     last_remaining = -1;
 	int64_t last_bar_ms = 0;
 
+	// A full-screen 4-gray identity image can't be partial-refreshed whole-frame
+	// (that would flatten the gray), so the countdown ticks only the opaque bottom
+	// banner via a region refresh, leaving the gray image above it intact.
+	const bool gray = s_mesh.identity_is_gray();
+
 	// Wake the panel for the partial-refresh countdown ticks (the identity redraw
 	// left it asleep after its full-refresh baseline draw).
 	s_gui.wake();
@@ -221,9 +226,11 @@ static bool run_awake_window(void)
 
 		// (LEDs animate on their own thread; see LEDStrip::init.)
 
-		// Repaint the bar ~1 Hz (flash-free partial refresh; periodic full refresh
-		// clears ghosting).
-		if (now - last_bar_ms >= 1000)
+		// A full-screen 4-gray identity is static — its banner is baked into the gray
+		// render and a 1-bit partial can't run over it, so there's no live bar to
+		// tick (heartbeats/button/timeout below still drive the window). The 1-bit
+		// identity repaints its countdown bar ~1 Hz (flash-free partial refresh).
+		if (!gray && now - last_bar_ms >= 1000)
 		{
 			last_bar_ms = now;
 			int remaining = (int)((deadline - now + 999) / 1000);

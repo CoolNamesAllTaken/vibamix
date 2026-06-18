@@ -11,11 +11,7 @@
 static constexpr int kCanvasW = EPD_HEIGHT; // 264
 static constexpr int kCanvasH = EPD_WIDTH;  // 176
 
-// Render stored grayscale image slots in real 4-level gray (SSD1680 custom waveform)
-// instead of dithering to 1bpp. Set to 0 to fall back to the dithered B/W path.
-#ifndef VIBAMIX_EPD_4GRAY
-#define VIBAMIX_EPD_4GRAY 1
-#endif
+// VIBAMIX_EPD_4GRAY is declared in GUI.h (so non-GUI code can pick the gray path).
 
 // Pre-condition the panel before each 4-gray render so the "from white" gray waveform
 // starts from a uniform state (kills the structured "tiny X" grain). 0=none,
@@ -135,27 +131,45 @@ void GUI::render_image(const uint8_t *buf, size_t len)
     printk("ePaper image displayed\n");
 }
 
-void GUI::render_gray2(const uint8_t *src, uint16_t w, uint16_t h)
+// Real 4-level gray full-screen render: load the gray waveform LUT, then write the
+// two bitplanes (m_image is reused for both planes in sequence — no second
+// framebuffer). The gray waveform is scoped to this render (EPD_Restore_BW leaves the
+// panel in B/W mode for whatever 1-bit overlay/refresh runs next).
+void GUI::render_gray_full(const uint8_t *src, uint16_t w, uint16_t h)
 {
-#if VIBAMIX_EPD_4GRAY
-    // Real 4-level gray: load the gray waveform LUT, then write the two bitplanes.
-    // m_image is reused for both planes in sequence (no second framebuffer). The
-    // gateway banner is skipped here — it's a 1-bit overlay that has no meaning in
-    // the dual-plane gray RAM, and image pushes are full-screen by design.
-    EPD_Condition_4Gray(VIBAMIX_EPD_4GRAY_CLEAR);  // uniform start state -> less grain
+    // Bare 4-gray render (the version that showed real levels). The W->B->W
+    // conditioning clear and the post-render EPD_Restore_BW were untested additions
+    // that broke it (stripe flashing, then a collapse to B/W) — left out here. The
+    // next render's wake() (EPD_HW_Init) restores B/W mode, so no explicit restore is
+    // needed. (EPD_Condition_4Gray / EPD_Restore_BW remain available for later tuning.)
     EPD_Init_4Gray();
     gray2_to_plane(src, w, h, m_image, 0);  // MSB plane -> RAM 0x26
     EPD_WritePlane(0x26, m_image);
     gray2_to_plane(src, w, h, m_image, 1);  // LSB plane -> RAM 0x24
     EPD_WritePlane(0x24, m_image);
     EPD_Update_4Gray();
-    EPD_Restore_BW();  // gray waveform is scoped to this render; leave the panel in B/W mode
+}
+
+void GUI::render_gray2(const uint8_t *src, uint16_t w, uint16_t h)
+{
+#if VIBAMIX_EPD_4GRAY
+    render_gray_full(src, w, h);
     printk("ePaper 4-gray image displayed\n");
 #else
     dither_2bit_to_fb(src, w, h, m_image);
     gateway_status_overlay(m_image);  // mesh-gateway banner (no-op unless relaying)
     EPD_Display(m_image);  // EPD_Display already triggers a full refresh internally
     printk("ePaper grayscale image displayed\n");
+#endif
+}
+
+void GUI::render_identity_gray(const uint8_t *src, uint16_t w, uint16_t h)
+{
+#if VIBAMIX_EPD_4GRAY
+    render_gray_full(src, w, h);  // image fills the screen; banner is baked into src
+#else
+    dither_2bit_to_fb(src, w, h, m_image);
+    EPD_Display(m_image);
 #endif
 }
 

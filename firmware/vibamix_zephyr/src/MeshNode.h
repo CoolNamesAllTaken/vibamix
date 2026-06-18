@@ -33,6 +33,11 @@ public:
     // into the corner before the refresh.
     void redraw_identity(bool sleeping = false);
 
+    // True if the last redraw_identity() rendered a full-screen 4-gray image (so the
+    // awake-window countdown must use the banner-region refresh, not a whole-frame
+    // partial which would flatten the gray). Set by redraw_identity().
+    bool identity_is_gray() const { return m_identity_gray; }
+
     // Called by file-scope C trampolines; not for external use.
     //
     // Mesh (broadcast, ephemeral): override the live LEDs / draw a text frame
@@ -65,6 +70,7 @@ private:
 
     GUI      *m_gui{nullptr};
     LEDStrip *m_leds{nullptr};
+    bool      m_identity_gray{false};
 };
 
 #endif /* VIBAMIX_MESH_NODE_H */
