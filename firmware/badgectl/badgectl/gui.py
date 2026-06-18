@@ -6,9 +6,10 @@ import asyncio
 import datetime
 import time
 import traceback
+from pathlib import Path
 
 from PyQt6.QtCore import QSortFilterProxyModel, Qt, QTimer
-from PyQt6.QtGui import QColor, QImage, QPixmap
+from PyQt6.QtGui import QColor, QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -60,6 +61,11 @@ QPushButton#ghost:hover { background: #404757; }
 QLineEdit, QPlainTextEdit, QComboBox, QSpinBox {
     background: #20242c; border: 1px solid #3a3f4b; border-radius: 6px; padding: 4px;
 }
+QComboBox { min-width: 90px; }
+QComboBox QAbstractItemView {
+    background: #20242c; color: #e6e9ef;
+    selection-background-color: #2d6cdf; padding: 2px;
+}
 QPlainTextEdit#log { font-family: Menlo, Consolas, monospace; font-size: 12px; }
 QLabel#status { font-weight: 700; }
 QTableView { background: #181b21; gridline-color: #2a2f3a; selection-background-color: #2d6cdf; }
@@ -80,6 +86,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("badgectl — vibamix")
+        self.setWindowIcon(QIcon(str(Path(__file__).parent / "assets" / "icon.png")))
         self.resize(1280, 800)
         self.setStyleSheet(STYLE)
 
@@ -187,6 +194,11 @@ class MainWindow(QMainWindow):
         self.table.setColumnWidth(COL_CHECK, 28)
         self.table.selectionModel().selectionChanged.connect(self._on_row_selected)
         v.addWidget(self.table)
+        # Delete/Backspace on the table forgets the selected badge.
+        for _seq in (QKeySequence.StandardKey.Delete, QKeySequence(Qt.Key.Key_Backspace)):
+            sc = QShortcut(_seq, self.table)
+            sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+            sc.activated.connect(self._forget_selected)
 
         row = QHBoxLayout()
         self.check_all_btn = QPushButton("Check all (filtered)")
@@ -195,11 +207,25 @@ class MainWindow(QMainWindow):
         self.uncheck_all_btn = QPushButton("Uncheck all")
         self.uncheck_all_btn.setObjectName("ghost")
         self.uncheck_all_btn.clicked.connect(lambda: self._check_visible(False))
+        self.forget_btn = QPushButton("Forget")
+        self.forget_btn.setObjectName("ghost")
+        self.forget_btn.setEnabled(False)
+        self.forget_btn.clicked.connect(self._forget_selected)
         row.addWidget(self.check_all_btn)
         row.addWidget(self.uncheck_all_btn)
+        row.addWidget(self.forget_btn)
         row.addStretch()
         v.addLayout(row)
         return w
+
+    def _forget_selected(self) -> None:
+        """Drop the selected badge from the scan list. Note: while a scan is
+        running it reappears on the next advertisement — most useful when stopped."""
+        d = self._selected_device()
+        if d is None:
+            return
+        self.model.remove(d.address)
+        self.count_lbl.setText(f"{self.model.rowCount()} devices")
 
     def _check_visible(self, checked: bool) -> None:
         for r in range(self.proxy.rowCount()):
@@ -218,6 +244,7 @@ class MainWindow(QMainWindow):
         d = self._selected_device()
         self.sel_lbl.setText(f"{d.name}  ({d.address[:8]}…)" if d else "—")
         self.connect_btn.setEnabled(d is not None and not self.link.connected and not self._batch_running)
+        self.forget_btn.setEnabled(d is not None)
 
     # ---------- action pane (right) ----------
     def _build_action_pane(self) -> QWidget:
@@ -412,6 +439,8 @@ class MainWindow(QMainWindow):
         for _code, _nm in keys.ANIM_NAMES.items():
             anim.addItem(_nm, _code)
         anim.setCurrentIndex(anim.findData(keys.ANIM_SOLID))
+        anim.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        anim.setMinimumContentsLength(8)  # fits "Rainbow"/"Sparkle"
         setattr(self, f"_{which}_led_anim", anim)
         sw = QLabel()
         sw.setFixedSize(40, 24)
@@ -878,6 +907,8 @@ class MainWindow(QMainWindow):
         for _code, _nm in keys.ANIM_NAMES.items():
             self.m_anim.addItem(_nm, _code)
         self.m_anim.setCurrentIndex(self.m_anim.findData(keys.ANIM_SOLID))
+        self.m_anim.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.m_anim.setMinimumContentsLength(8)  # fits "Rainbow"/"Sparkle"
         cb = QPushButton("Send LED")
         cb.clicked.connect(lambda: self._go(self._mesh_send(
             keys.OP_SET_LED, bytes([self.m_anim.currentData()]) + bytes(self._led))))

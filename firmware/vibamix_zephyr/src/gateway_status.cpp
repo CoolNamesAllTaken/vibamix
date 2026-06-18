@@ -5,6 +5,7 @@
 #include "fonts.h"
 
 #include <stdio.h>
+#include <zephyr/kernel.h>   // k_uptime_get for the "active since" timer
 
 // ROTATE_270 drawing surface is EPD_HEIGHT wide x EPD_WIDTH tall.
 static constexpr int kCanvasW = EPD_HEIGHT; // 264
@@ -13,6 +14,7 @@ static constexpr int kBannerH = 20;
 static bool     s_active;
 static int      s_cmd = -1;
 static uint32_t s_count;
+static int64_t  s_start_ms;   // uptime when the first command was relayed
 static bool     s_ka_alive;
 static bool     s_ka_blink;
 
@@ -37,13 +39,25 @@ void gateway_status_set_active(bool on)
 	if (!on) {
 		s_cmd = -1;
 		s_count = 0;
+		s_start_ms = 0;
 	}
 }
 
 bool gateway_status_active(void)              { return s_active; }
-void gateway_status_note(int cmd)             { s_cmd = cmd; s_count++; }
+void gateway_status_note(int cmd)
+{
+	if (s_count == 0) {
+		s_start_ms = k_uptime_get();   // start the "active as gateway" timer
+	}
+	s_cmd = cmd;
+	s_count++;
+}
 uint32_t gateway_status_count(void)           { return s_count; }
 const char *gateway_status_label(void)        { return label_for(s_cmd); }
+uint32_t gateway_status_active_secs(void)
+{
+	return s_count ? (uint32_t)((k_uptime_get() - s_start_ms) / 1000) : 0;
+}
 void gateway_status_set_keepalive(bool a, bool b) { s_ka_alive = a; s_ka_blink = b; }
 
 static void fill(int x0, int y0, int x1, int y1, uint16_t color)

@@ -280,6 +280,15 @@ void ConfigMode::on_name(const char *s, size_t len)
 void ConfigMode::on_content_image(uint8_t slot, uint8_t fmt, const uint8_t *buf,
                                   size_t len, uint16_t w, uint16_t h)
 {
+    // A render-only image broadcast to the whole fleet (slot NONE): if this badge is a
+    // mesh gateway, just note the relay for its stats and stay on the Mesh Gateway
+    // screen — don't take over the panel with the content it's broadcasting. (Stored
+    // slots 0-3 / identity are direct per-badge config and still render below.)
+    if (gateway_status_active() && slot == BADGE_SLOT_NONE) {
+        gateway_status_note(GW_CMD_IMAGE);
+        return;
+    }
+
     // Runs on the BT RX thread: record the work and let run() do the store+render
     // on the main thread (rendering here would block the link and drop the
     // connection). Copy into the buffer the main thread isn't rendering, so a
@@ -421,13 +430,15 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
     // countdown (reset by the event-mesh heartbeat). A button press, or the window
     // elapsing while not connected, ends config mode.
     const struct app_config *cfg = app_config_get();
-    enum { PHASE_QR, PHASE_CONNECTED, PHASE_IDENTITY } phase = PHASE_QR;
+    enum { PHASE_QR, PHASE_CONNECTED } phase = PHASE_QR;
+    bool s_disconnected_exit = false;   // ended because the peer dropped the GATT link
     int last_shown = -1;
     int tick = 0;
     int64_t last_ka_sent = 0;   // last 1 Hz keepalive notify (main thread)
     uint8_t ka_seq = 0;
     bool    ka_blink = false;
     int     ka_tick = 0;
+    bool    gw_shown = false;   // last connected-screen variant (false=Connected, true=Mesh Gateway)
     // True once the currently-shown content frame has been (re)established as the
     // partial-refresh base while the panel is awake — so the keepalive dot can be
     // partial-refreshed over it. Invalidated whenever a content frame is rendered
@@ -495,6 +506,7 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
             last_ka_sent = 0;                      // notify immediately
             ka_blink = false;
             gateway_status_set_active(true);       // relayed mesh commands now overlay
+            gw_shown = false;                      // count==0 at connect -> Connected screen
             gui->wake();
             config_screen_connected(*gui, cfg->name,
                                     cfg->has_attendee ? cfg->attendee_id : "",
@@ -502,12 +514,12 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
             gui->set_base_map();
             last_shown = -1;
         } else if (!connected && phase == PHASE_CONNECTED) {
-            // Just disconnected: show the identity screen + a fresh countdown.
-            phase = PHASE_IDENTITY;
-            s_content_shown = false;
+            // Computer disconnected: fully leave config mode so main() restores the
+            // home identity frame and runs the heartbeat-aware mesh-mode countdown
+            // (run_awake_window). The post-loop cleanup below tears everything down.
             gateway_status_set_active(false);
-            note_activity();
-            last_shown = -1;
+            s_disconnected_exit = true;
+            break;
         }
 
         if (s_exit) {
@@ -530,10 +542,23 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
                 bool app_alive = (now - s_last_keepalive_rx) < 3000;
                 gateway_status_set_keepalive(app_alive, ka_blink);  // feed the banner dot
                 if (!s_content_shown) {
-                    config_screen_connected(*gui, cfg->name,
-                                            cfg->has_attendee ? cfg->attendee_id : "",
-                                            batt_mv, batt_pct, app_alive, ka_blink);
-                    if (++ka_tick % kFullRefreshEvery == 0) {
+                    // Once this badge has relayed >=1 command to the fleet it's a mesh
+                    // gateway -> dedicated screen; otherwise the plain Connected screen.
+                    const bool gw = gateway_status_count() > 0;
+                    if (gw) {
+                        config_screen_gateway(*gui, batt_mv, batt_pct, app_alive, ka_blink);
+                    } else {
+                        config_screen_connected(*gui, cfg->name,
+                                                cfg->has_attendee ? cfg->attendee_id : "",
+                                                batt_mv, batt_pct, app_alive, ka_blink);
+                    }
+                    if (gw != gw_shown) {
+                        // Layout changed (Connected <-> Gateway): full refresh so the
+                        // old layout doesn't ghost through the partial.
+                        gw_shown = gw;
+                        ka_tick = 0;
+                        gui->set_base_map();
+                    } else if (++ka_tick % kFullRefreshEvery == 0) {
                         gui->set_base_map();
                     } else {
                         gui->refresh_partial();
@@ -571,14 +596,9 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
             }
             if (remaining != last_shown) {
                 last_shown = remaining;
-                if (phase == PHASE_QR) {
-                    qr_screen_draw(*gui, code, url, batt_mv, batt_pct, remaining, total_sec);
-                } else {
-                    identity_status_screen_draw(*gui, cfg->name,
-                                                cfg->has_attendee ? cfg->attendee_id : "",
-                                                batt_mv, batt_pct,
-                                                remaining, total_sec);
-                }
+                // Only the QR phase repaints here — a disconnect exits the loop, so
+                // phase is always PHASE_QR while disconnected.
+                qr_screen_draw(*gui, code, url, batt_mv, batt_pct, remaining, total_sec);
                 if (++tick % kFullRefreshEvery == 0) {
                     gui->set_base_map();   // periodic full refresh to clear ghosting
                 } else {
@@ -600,7 +620,8 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
 
         k_sleep(K_MSEC(100));
     }
-    printk("config: window closing (%s)\n", s_exit ? "button" : "timeout");
+    printk("config: window closing (%s)\n",
+           s_exit ? "button" : s_disconnected_exit ? "disconnect" : "timeout");
 
     if (leds) {
         leds->off();   // strip dark for the identity rest + System OFF

@@ -122,9 +122,12 @@ static void wdt_keepalive_start(void)
 	k_timer_start(&s_wdt_timer, K_SECONDS(2), K_SECONDS(2));
 }
 
-// Put app-owned, non-wake GPIOs into their lowest-power state before System OFF.
-// nRF54L retains GPIO output drive across System OFF, so anything left driven keeps
-// burning current. main() re-drives all of these on the next wake.
+// Float app-owned, non-wake GPIOs to high impedance before System OFF. nRF54L15 does not
+// reliably hold a *driven* output through System OFF, so rather than fight that we
+// disconnect these pins and let the board's pull resistors settle each net into its safe
+// (off) state — e.g. the external pull-up on the WS2812 power-bus PMOS gate (P1.07, cut by
+// LEDStrip::off()) keeps the strip's VDD disabled. High-Z also draws no current itself.
+// main() re-drives all of these on the next wake.
 //
 // The user button (P0.00) is NOT touched here — enter_deep_sleep() arms it as the
 // wake source afterwards, so this must run first. The ePaper control pins
@@ -133,20 +136,20 @@ static void wdt_keepalive_start(void)
 // disturbing them risks the retained image.
 static void gpio_lowpower_for_sleep(void)
 {
-	// Antenna RF switch (U10): cut control + VDD so the FM8625H powers down
-	// (active-high, so INACTIVE = LOW = off).
+	// Antenna RF switch (U10) control + VDD, and the user status LED: disconnect so the
+	// board pulls hold them off. (The WS2812 power-bus gate P1.07 is floated by
+	// LEDStrip::off(), which ran first in enter_deep_sleep().)
 	if (gpio_is_ready_dt(&rf_sw_ctl))
 	{
-		gpio_pin_configure_dt(&rf_sw_ctl, GPIO_OUTPUT_INACTIVE);
+		gpio_pin_configure_dt(&rf_sw_ctl, GPIO_DISCONNECTED);
 	}
 	if (gpio_is_ready_dt(&rf_sw_pwr))
 	{
-		gpio_pin_configure_dt(&rf_sw_pwr, GPIO_OUTPUT_INACTIVE);
+		gpio_pin_configure_dt(&rf_sw_pwr, GPIO_DISCONNECTED);
 	}
-	// User status LED off (the WS2812 power gate is cut by LEDStrip::off()).
 	if (gpio_is_ready_dt(&user_led))
 	{
-		gpio_pin_configure_dt(&user_led, GPIO_OUTPUT_INACTIVE);
+		gpio_pin_configure_dt(&user_led, GPIO_DISCONNECTED);
 	}
 }
 
@@ -356,7 +359,12 @@ int main(void)
 		// press to re-enter config instead of sleeping.
 		if (debugger_attached())
 		{
-			printk("Debugger attached - staying awake (skipping System OFF); press button for config mode\n");
+			printk("Debugger attached - skipping System OFF; resting asleep, press button for config mode\n");
+			// Can't truly System OFF under a debugger, so simulate sleep: blank the LED
+			// strip and rest the bistable panel on the asleep identity frame. Otherwise the
+			// awake-window animation keeps running and it never looks asleep.
+			s_leds.off();
+			s_mesh.redraw_identity(/*sleeping=*/true);
 			wait_button_release();
 			s_btn_event = false;
 			while (!s_btn_event)

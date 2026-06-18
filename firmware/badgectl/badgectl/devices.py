@@ -102,6 +102,18 @@ class DeviceModel(QAbstractTableModel):
                 d.device = device
             self.dataChanged.emit(self.index(i, 0), self.index(i, len(HEADERS) - 1))
 
+    def remove(self, address: str) -> None:
+        """Drop a discovered badge from the list (reindexes the shifted rows)."""
+        i = self._index.get(address)
+        if i is None:
+            return
+        self.beginRemoveRows(QModelIndex(), i, i)
+        del self._rows[i]
+        del self._index[address]
+        for j in range(i, len(self._rows)):
+            self._index[self._rows[j].address] = j
+        self.endRemoveRows()
+
     def device_at(self, row: int) -> Device:
         return self._rows[row]
 

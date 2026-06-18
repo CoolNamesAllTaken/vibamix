@@ -32,6 +32,7 @@ bool gateway_status_active(void);
 void gateway_status_note(int cmd);          /* record a relayed command (+count) */
 uint32_t gateway_status_count(void);
 const char *gateway_status_label(void);     /* label of the last relayed command */
+uint32_t gateway_status_active_secs(void);  /* seconds since the first relayed command (0 if none) */
 void gateway_status_set_keepalive(bool alive, bool blink);
 
 /* No-op unless active and at least one command has been relayed; otherwise draws

@@ -27,13 +27,18 @@ void qr_screen_draw(GUI &gui, const char *code, const char *url,
 void config_screen_connected(GUI &gui, const char *name, const char *table,
                              int batt_mv, int batt_pct, bool app_alive, bool blink);
 
+/* "Mesh Gateway" screen — shown once this badge has relayed >=1 command to the fleet
+ * (gateway_status_count() > 0). A broadcast/mesh symbol, a "Mesh Gateway" label, and
+ * live stats (relayed count, last command, time active, target) + the keepalive dot. */
+void config_screen_gateway(GUI &gui, int batt_mv, int batt_pct,
+                           bool app_alive, bool blink);
+
 /* Identity frame (the badge's resting home screen): an optional identity image
  * (2-bit grayscale, authored on the 264x176 landscape canvas) filling the main
  * area, over a thin bottom banner holding the attendee name (left) + attendee ID
  * (right). Pass img=NULL for no image (main area stays blank). This static draw
  * is the partial-refresh baseline; the awake loop ticks the countdown on top of
- * it via identity_countdown_overlay. The status variant adds the battery + a
- * shrinking countdown bar (shown after a config disconnect, until sleep). */
+ * it via identity_countdown_overlay. */
 void identity_screen_draw(GUI &gui, const char *name, const char *table,
                           const uint8_t *img, uint8_t img_fmt,
                           uint16_t img_w, uint16_t img_h);
@@ -42,9 +47,6 @@ void identity_screen_draw(GUI &gui, const char *name, const char *table,
  * it (e.g. a full-screen B/W identity image blitted in). 1-bit, so it supports the
  * live awake-window countdown. */
 void identity_banner_over(GUI &gui, const char *name, const char *table);
-void identity_status_screen_draw(GUI &gui, const char *name, const char *table,
-                                 int batt_mv, int batt_pct,
-                                 int remaining_sec, int total_sec);
 
 /* Re-composite the identity frame's bottom banner + a thin countdown fill onto an
  * already-built framebuffer (call identity_screen_draw first, push it as the

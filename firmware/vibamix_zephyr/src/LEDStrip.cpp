@@ -184,17 +184,19 @@ void LEDStrip::power_on()
 void LEDStrip::off()
 {
     // Stop the render thread committing, push black out (while still powered), then
-    // cut the power gate so the WS2812 VDD rail collapses and the chain draws no
-    // current in sleep. Safe to call even if init() failed (e.g. the strip device
-    // never came up): skip the black-out commit in that case, but ALWAYS cut the
-    // gate — init() drives it active before the strip-ready check, so this is the
-    // one operation that must run to leave the rail powered down before sleep.
+    // float the power gate to high impedance so the WS2812 VDD rail collapses and the
+    // chain draws no current. The PMOS gate has an external pull-up, so disconnecting the
+    // pin (rather than actively driving it) pulls the gate high = PMOS off, and that holds
+    // through System OFF where a driven output isn't reliably retained. Safe to call even
+    // if init() failed (e.g. the strip device never came up): skip the black-out commit in
+    // that case, but ALWAYS float the gate — init() drives it active before the strip-ready
+    // check, so this is the one operation that must run to leave the rail off before sleep.
     m_powered = false;
     m_pattern = LedPattern::Off;
     if (device_is_ready(s_strip)) {
         render_off();
     }
-    gpio_pin_set_dt(&s_power, 0);   // logical 0 = inactive = PMOS off (active-low gate)
+    gpio_pin_configure_dt(&s_power, GPIO_DISCONNECTED);   // high-Z; external pull-up -> PMOS off
 }
 
 void LEDStrip::render_off()

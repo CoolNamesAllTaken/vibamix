@@ -56,8 +56,9 @@ static void cb_show_led(uint8_t anim, uint8_t r, uint8_t g, uint8_t b)
 
 static void cb_show_text(const char *title, size_t tlen, const char *body, size_t blen)
 {
+    // on_show_text decides whether to render (and signal config_mode_on_content); a
+    // gateway badge notes the relay but stays on its gateway screen.
     if (s_self) { s_self->on_show_text(title, tlen, body, blen); }
-    config_mode_on_content();     // a text frame took over the panel; keep awake
 }
 
 } // extern "C"
@@ -254,15 +255,17 @@ void MeshNode::on_show_text(const char *title, size_t tlen, const char *body, si
     if (!m_gui) {
         return;
     }
-    // Mesh broadcast: draw the text frame straight to the panel. Not stored, so a
-    // reboot returns to the identity frame. Mirror on_display_screen's gateway
-    // handling so a connected gateway overlays its relay banner and stays awake.
+    // Mesh broadcast (always a fleet "show text" — not stored). A gateway badge only
+    // notes the relay for its stats and stays on the Mesh Gateway screen; it does not
+    // render the broadcast it's sending to the fleet.
     if (gateway_status_active()) {
         gateway_status_note(GW_CMD_SCREEN);
+        return;
     }
     m_gui->wake();
     m_gui->show_text(title, body);
     m_gui->sleep();
+    config_mode_on_content();   // content took over the panel; keep awake (no-op outside config)
 }
 
 void MeshNode::on_mesh_tx(const uint8_t *access, size_t len)

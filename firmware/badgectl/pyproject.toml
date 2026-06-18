@@ -5,6 +5,7 @@ description = "Laptop GUI to exercise all vibamix badge GATT + Bluetooth Mesh fu
 authors = ["vibamix"]
 readme = "README.md"
 packages = [{ include = "badgectl" }]
+include = [{ path = "badgectl/assets/*.png", format = ["sdist", "wheel"] }]
 
 # System notes:
 #   macOS: first run prompts for Bluetooth permission (System Settings > Privacy).

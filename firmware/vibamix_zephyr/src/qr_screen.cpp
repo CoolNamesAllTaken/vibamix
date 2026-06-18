@@ -448,18 +448,6 @@ void identity_bake_overlays(uint8_t *src, uint16_t w, uint16_t h, uint8_t *scrat
     }
 }
 
-void identity_status_screen_draw(GUI &gui, const char *name, const char *table,
-                                 int batt_mv, int batt_pct,
-                                 int remaining_sec, int total_sec)
-{
-    uint8_t *fb = gui.framebuffer();
-
-    Paint_NewImage(fb, EPD_WIDTH, EPD_HEIGHT, ROTATE_270, WHITE);
-    Paint_Clear(WHITE);
-    draw_status_bar(batt_mv, batt_pct, remaining_sec, total_sec);
-    draw_identity_body(name, table, nullptr, 0, 0, 0, 42);
-}
-
 // A clean "settings" gear centered at (cx, cy), rasterized in polar form so the
 // teeth are crisp radial spokes (not square blobs): the body is a solid ring out
 // to r_root, then n_teeth evenly spaced teeth extend out to r_tip, with a punched
@@ -588,11 +576,102 @@ void config_screen_connected(GUI &gui, const char *name, const char *table,
         draw_wrapped(rx, ry, rmaxW, bc, &PoppinsMd16);
     } else {
         draw_wrapped(rx, ry, rmaxW,
-                     "Edit your name, facts & image from the vibamix app.",
+                     "Configure your badge from the vibamix app.",
                      &PoppinsMd16);
     }
 
     // Bottom bar: an inverted strip with the exit instruction, so it's unmissable.
+    const int bar_h = 24;
+    const int by0 = kCanvasH - bar_h;
+    fill_rect(0, by0, kCanvasW - 1, kCanvasH - 1);
+    const char *exit_lbl = "Press the button to exit";
+    const int ew = Paint_StringWidth_P(exit_lbl, &PoppinsMd16);
+    Paint_DrawString_P((kCanvasW - ew) / 2, by0 + 4, exit_lbl,
+                       &PoppinsMd16, BLACK, WHITE);
+}
+
+// A "mesh gateway" symbol: a filled hub node with two broadcast rings and three
+// satellite nodes on spokes (the fleet) — reads as "this node is broadcasting to a
+// network." Built from the same circle/line primitives as draw_gear / draw_bt_badge.
+static void draw_gateway_symbol(int cx, int cy, int r)
+{
+    constexpr float kPi = 3.14159265f;
+
+    // Two concentric broadcast rings.
+    Paint_DrawCircle(cx, cy, r, BLACK, DRAW_FILL_EMPTY, DOT_PIXEL_1X1);
+    Paint_DrawCircle(cx, cy, (r * 3) / 5, BLACK, DRAW_FILL_EMPTY, DOT_PIXEL_1X1);
+
+    // Three satellite nodes on spokes (top, lower-right, lower-left).
+    for (int i = 0; i < 3; i++) {
+        const float a = -kPi / 2 + i * (2.0f * kPi / 3.0f);
+        const int sx = cx + (int)(cosf(a) * r);
+        const int sy = cy + (int)(sinf(a) * r);
+        Paint_DrawLine(cx, cy, sx, sy, BLACK, LINE_STYLE_SOLID, DOT_PIXEL_1X1);
+        Paint_DrawCircle(sx, sy, 4, BLACK, DRAW_FILL_FULL, DOT_PIXEL_1X1);
+    }
+
+    // Filled hub node last, so the spokes don't cut through it.
+    Paint_DrawCircle(cx, cy, r / 4 + 2, BLACK, DRAW_FILL_FULL, DOT_PIXEL_1X1);
+}
+
+void config_screen_gateway(GUI &gui, int batt_mv, int batt_pct,
+                           bool app_alive, bool blink)
+{
+    uint8_t *fb = gui.framebuffer();
+
+    Paint_NewImage(fb, EPD_WIDTH, EPD_HEIGHT, ROTATE_270, WHITE);
+    Paint_Clear(WHITE);
+
+    // Top status bar: battery (left), keepalive pulse dot (right), divider — same as
+    // the Connected screen.
+    char pc[20];
+    const int icon_end = draw_battery_icon(kMargin, 4, batt_mv >= 0 ? batt_pct : 0);
+    if (batt_mv >= 0) {
+        snprintf(pc, sizeof(pc), "%d%% (%d.%02dV)", batt_pct,
+                 batt_mv / 1000, (batt_mv % 1000) / 10);
+    } else {
+        snprintf(pc, sizeof(pc), "-- %%");
+    }
+    Paint_DrawString_P(icon_end + 3, 1, pc, &PoppinsMd16, WHITE, BLACK);
+
+    const int dx1 = kCanvasW - kMargin;
+    const int dx0 = dx1 - 8;
+    if (app_alive && blink) {
+        fill_rect(dx0, 5, dx1, 13);
+    } else {
+        draw_rect(dx0, 5, dx1, 13);
+    }
+    fill_rect(kMargin, 24, kCanvasW - kMargin, 24);
+
+    // Heading across the top.
+    Paint_DrawString_P(kMargin, 30, "Mesh Gateway", &PoppinsSB24, WHITE, BLACK);
+
+    // Broadcast/mesh symbol on the left, below the heading.
+    draw_gateway_symbol(48, 116, 28);
+
+    // Stats column on the right.
+    const int rx = 96;
+    int ry = 64;
+    const int lh = PoppinsMd16.Height + 6;
+    char line[40];
+
+    snprintf(line, sizeof(line), "Relayed: %u", (unsigned)gateway_status_count());
+    Paint_DrawString_P(rx, ry, line, &PoppinsMd16, WHITE, BLACK);
+    ry += lh;
+
+    snprintf(line, sizeof(line), "Last: %s", gateway_status_label());
+    Paint_DrawString_P(rx, ry, line, &PoppinsMd16, WHITE, BLACK);
+    ry += lh;
+
+    const uint32_t secs = gateway_status_active_secs();
+    snprintf(line, sizeof(line), "Active: %u:%02u", (unsigned)(secs / 60),
+             (unsigned)(secs % 60));
+    Paint_DrawString_P(rx, ry, line, &PoppinsMd16, WHITE, BLACK);
+    ry += lh;
+
+    Paint_DrawString_P(rx, ry, "-> All badges", &PoppinsMd16, WHITE, BLACK);
+
+    // Bottom bar: exit instruction (same as the Connected screen).
     const int bar_h = 24;
     const int by0 = kCanvasH - bar_h;
     fill_rect(0, by0, kCanvasW - 1, kCanvasH - 1);
