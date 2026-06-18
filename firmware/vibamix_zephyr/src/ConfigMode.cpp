@@ -586,7 +586,8 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
                 }
             }
         }
-        // Drive the per-frame LED strip to match whether a content frame is shown.
+        // Gate the per-frame LED strip on while a content frame is shown (the LED
+        // render thread animates it; see LEDStrip::init).
         if (leds) {
             if (s_content_shown && !led_on) {
                 leds->power_on();
@@ -595,13 +596,9 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
                 leds->off();
                 led_on = false;
             }
-            if (led_on) {
-                leds->render();
-            }
         }
 
-        // Tick fast enough for smooth animation only while the strip is lit.
-        k_sleep(K_MSEC(led_on ? LEDStrip::kFrameMs : 250));
+        k_sleep(K_MSEC(100));
     }
     printk("config: window closing (%s)\n", s_exit ? "button" : "timeout");
 

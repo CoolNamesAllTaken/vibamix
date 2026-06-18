@@ -7,6 +7,7 @@
 #include "gateway_status.h"
 #include "qrcodegen.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <zephyr/sys/printk.h>
@@ -362,27 +363,43 @@ void identity_status_screen_draw(GUI &gui, const char *name, const char *table,
     draw_identity_body(name, table, nullptr, 0, 0, 0, 42);
 }
 
-// 8 unit vectors (cos, sin) x1024 at 45-degree steps, for placing gear teeth
-// around the body without pulling in math.h / floating point.
-static const int kDir8[8][2] = {
-    { 1024, 0 }, { 724, 724 }, { 0, 1024 }, { -724, 724 },
-    { -1024, 0 }, { -724, -724 }, { 0, -1024 }, { 724, -724 },
-};
-
-// A chunky "settings" gear centered at (cx, cy): a filled body circle, eight
-// square teeth poking out to r_outer, and a punched-out white center hole.
-static void draw_gear(int cx, int cy, int r_outer, int hole_r)
+// A clean "settings" gear centered at (cx, cy), rasterized in polar form so the
+// teeth are crisp radial spokes (not square blobs): the body is a solid ring out
+// to r_root, then n_teeth evenly spaced teeth extend out to r_tip, with a punched
+// white center hole. Runs over a small box once per refresh, so the per-pixel
+// trig is cheap.
+static void draw_gear(int cx, int cy, int r_tip, int hole_r)
 {
-    const int ht = r_outer / 4;          // tooth half-size
-    const int r_body = r_outer - ht;     // teeth reach out to ~r_outer
+    constexpr float kPi = 3.14159265f;
+    constexpr int   n_teeth = 8;
+    constexpr float duty = 0.5f;          // solid fraction of each tooth pitch
+    const float r_root = r_tip * 0.74f;
 
-    Paint_DrawCircle(cx, cy, r_body, BLACK, DRAW_FILL_FULL, DOT_PIXEL_1X1);
-    for (int i = 0; i < 8; i++) {
-        const int tx = cx + r_body * kDir8[i][0] / 1024;
-        const int ty = cy + r_body * kDir8[i][1] / 1024;
-        fill_rect(tx - ht, ty - ht, tx + ht, ty + ht);
+    for (int y = cy - r_tip; y <= cy + r_tip; y++) {
+        for (int x = cx - r_tip; x <= cx + r_tip; x++) {
+            const float dx = (float)(x - cx);
+            const float dy = (float)(y - cy);
+            const float dist = sqrtf(dx * dx + dy * dy);
+            if (dist > (float)r_tip || dist <= (float)hole_r) {
+                continue;                 // outside the tip / inside the hole
+            }
+            bool solid;
+            if (dist <= r_root) {
+                solid = true;             // body ring
+            } else {
+                float a = atan2f(dy, dx) / (2.0f * kPi);   // -0.5 .. 0.5
+                if (a < 0.0f) {
+                    a += 1.0f;
+                }
+                float frac = a * n_teeth;
+                frac -= (float)(int)frac; // position within this tooth pitch
+                solid = (frac < duty);    // tooth vs gap
+            }
+            if (solid) {
+                Paint_SetPixel(x, y, BLACK);
+            }
+        }
     }
-    Paint_DrawCircle(cx, cy, hole_r, WHITE, DRAW_FILL_FULL, DOT_PIXEL_1X1);
 }
 
 // The Bluetooth rune in `color`, centered at (cx, cy): a vertical spine, top/

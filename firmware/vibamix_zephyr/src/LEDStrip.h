@@ -31,7 +31,8 @@ public:
     // drives render() ticks at the same cadence the animations assume.
     static constexpr uint32_t kFrameMs = 40;
 
-    // Enables the strip's power gate and checks the device is ready.
+    // Enables the strip's power gate, checks the device is ready, and starts the
+    // dedicated render thread (steady ~25 fps, independent of the ePaper/main loop).
     int init();
 
     // Select the active pattern drawn by render(). This is the command hook
@@ -47,23 +48,21 @@ public:
     // Used to apply a frame's per-frame LED config when it's displayed.
     void set_anim(LedPattern pattern, uint8_t r, uint8_t g, uint8_t b);
 
-    // Draw one frame of the active pattern and advance its animation clock.
-    void render();
-
     // Re-assert the WS2812 power gate (PMOS on) after a prior off(), e.g. when
-    // config mode wants to light a frame's LED again. init() also does this.
+    // config mode wants to light a frame's LED again. init() also does this. The
+    // render thread resumes driving the strip while powered.
     void power_on();
 
     // Blank the chain and cut the WS2812 power gate (PMOS off), e.g. before
-    // deep sleep so the strip draws no current.
+    // deep sleep so the strip draws no current. The render thread idles while off.
     void off();
 
-    // Blocking: render the active pattern for `duration_ms` as a boot "alive"
-    // signal before the GUI/mesh come up. Shares the animation clock with
-    // render(), so the main loop continues the same animation seamlessly.
-    void play_for(uint32_t duration_ms);
-
 private:
+    // Render thread: draws the active pattern every kFrameMs while powered.
+    static void thread_entry(void *a, void *b, void *c);
+    void render_loop();
+    // Draw one frame of the active pattern and advance its animation clock.
+    void render();
     void render_off();
     void render_solid();
     void render_rainbow();
@@ -78,8 +77,9 @@ private:
     struct led_rgb m_color{};
     LedPattern     m_pattern{LedPattern::Wheel};
     uint32_t       m_tick{0};   // free-running animation frame counter
-    uint8_t        m_level[STRIP_NUM_PIXELS]{};  // per-pixel fade state (comet/sparkle)
+    uint8_t        m_level[STRIP_NUM_PIXELS]{};  // per-pixel fade state (sparkle)
     uint32_t       m_rng{0x1234abcdu};           // xorshift PRNG state (sparkle)
+    volatile bool  m_powered{false};             // strip gate on -> render thread commits
 };
 
 #endif /* VIBAMIX_LED_STRIP_H */

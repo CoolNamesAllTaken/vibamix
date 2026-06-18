@@ -79,6 +79,16 @@ void EPD_Display_Partial(const unsigned char *Image)
 	EPD_W21_RST_1;
 	delay_xms(10);
 
+	// SWRESET, exactly as EPD_HW_Init does it. The base map is drawn in the post-
+	// SWRESET state; a bare hardware reset without this leaves the gate/RAM
+	// addressing one line off, so the first partial lands 1px left of the base map
+	// (canvas X = the panel gate axis under ROTATE_270). SWRESET preserves RAM (the
+	// base map's two banks survive) and clears the full-refresh border/VCOM — which
+	// is what the washout fix wanted — so it keeps that fix and removes the shift.
+	Epaper_READBUSY();
+	Epaper_Write_Command(0x12); // SWRESET
+	Epaper_READBUSY();
+
 	Epaper_Write_Command(0x3C); // BorderWaveform
 	Epaper_Write_Data(0x80);    // partial-mode border
 
@@ -100,11 +110,12 @@ void Epaper_Spi_WriteByte(unsigned char TxData)
 
 void Epaper_READBUSY(void)
 {
-	while (1)
+	// Poll with a 1 ms yield rather than a tight spin: a refresh holds BUSY for
+	// hundreds of ms (partial) to ~2 s (full), and busy-spinning would starve the
+	// LED render thread (causing visible animation stutter) and waste power.
+	while (isEPD_W21_BUSY != 0)
 	{ //=1 BUSY
-		if (isEPD_W21_BUSY == 0)
-			break;
-		;
+		k_msleep(1);
 	}
 }
 

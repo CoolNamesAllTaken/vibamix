@@ -208,10 +208,7 @@ int main(void)
 				event_active = true;
 			}
 
-			if (leds_ok)
-			{
-				s_leds.render();
-			}
+			// (LEDs animate on their own thread; see LEDStrip::init.)
 
 			// Repaint the bar ~1 Hz (flash-free partial refresh; periodic full
 			// refresh clears ghosting).

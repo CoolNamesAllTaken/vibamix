@@ -23,12 +23,18 @@ static constexpr float    kBlobFloor  = 0.10f; // faint floor so the wheel stays
 // Breathe: triangle-wave brightness period (frames). ~64*40ms ≈ 2.6 s.
 static constexpr uint32_t kBreathePeriod = 64;
 static constexpr uint8_t  kBreatheFloor  = 28;   // dimmest point of the pulse
-// Comet: frames the head dwells on each LED, and per-LED tail falloff.
-static constexpr uint32_t kCometStep = 6;
-static constexpr int      kCometFade = 110;
-// Sparkle: per-frame decay, dim floor, and ~1/N spawn chance.
-static constexpr uint8_t  kSparkDecay = 18;
+// Comet: a fractional head sweeps the ring continuously; brightness falls off with
+// distance behind the head (a short tail), so motion is smooth, not per-LED hops.
+static constexpr float kCometFramesPerLoop = 60.0f;  // frames for one full sweep (~2.4 s)
+static constexpr float kCometTail = 1.8f;            // tail length, in LED units
+// Sparkle: per-frame decay (gentler = smoother fade), dim floor, ~1/N spawn chance.
+static constexpr uint8_t  kSparkDecay = 10;
 static constexpr uint8_t  kSparkFloor = 12;
+
+// Render thread: draws the active pattern at kFrameMs independent of the main /
+// ePaper loop, so a (blocking) panel refresh can't stall the animation.
+K_THREAD_STACK_DEFINE(s_led_stack, 768);
+static struct k_thread s_led_thread;
 
 static const struct device *const s_strip = DEVICE_DT_GET(STRIP_NODE);
 
@@ -78,8 +84,34 @@ int LEDStrip::init()
         printk("LED strip device not ready\n");
         return -ENODEV;
     }
+
+    // Drive rendering from a dedicated, steady-cadence thread so the ePaper's
+    // (blocking) refreshes on the main thread don't freeze the animation.
+    m_powered = true;
+    k_thread_create(&s_led_thread, s_led_stack, K_THREAD_STACK_SIZEOF(s_led_stack),
+                    LEDStrip::thread_entry, this, NULL, NULL,
+                    K_PRIO_PREEMPT(10), 0, K_NO_WAIT);
+    k_thread_name_set(&s_led_thread, "led");
+
     printk("LED strip ready (%d pixels)\n", STRIP_NUM_PIXELS);
     return 0;
+}
+
+void LEDStrip::thread_entry(void *a, void *b, void *c)
+{
+    ARG_UNUSED(b);
+    ARG_UNUSED(c);
+    static_cast<LEDStrip *>(a)->render_loop();
+}
+
+void LEDStrip::render_loop()
+{
+    for (;;) {
+        if (m_powered) {
+            render();
+        }
+        k_sleep(K_MSEC(kFrameMs));
+    }
 }
 
 void LEDStrip::set_pattern(LedPattern pattern)
@@ -144,26 +176,20 @@ void LEDStrip::render()
 void LEDStrip::power_on()
 {
     // Re-enable the active-low PMOS gate so the WS2812 VDD rail is restored after
-    // a prior off() (which cut it). render()/commit() can then light the chain.
+    // a prior off() (which cut it). The render thread resumes lighting the chain.
     gpio_pin_configure_dt(&s_power, GPIO_OUTPUT_ACTIVE);
+    m_powered = true;
 }
 
 void LEDStrip::off()
 {
-    // Push black out first (while still powered), then cut the power gate so
-    // the WS2812 VDD rail collapses and the chain draws no current in sleep.
+    // Stop the render thread committing, push black out (while still powered), then
+    // cut the power gate so the WS2812 VDD rail collapses and the chain draws no
+    // current in sleep.
+    m_powered = false;
     m_pattern = LedPattern::Off;
     render_off();
     gpio_pin_set_dt(&s_power, 0);   // logical 0 = inactive = PMOS off (active-low gate)
-}
-
-void LEDStrip::play_for(uint32_t duration_ms)
-{
-    const int64_t deadline = k_uptime_get() + duration_ms;
-    while (k_uptime_get() < deadline) {
-        render();
-        k_sleep(K_MSEC(kFrameMs));
-    }
 }
 
 void LEDStrip::render_off()
@@ -238,16 +264,21 @@ void LEDStrip::render_breathe()
 
 void LEDStrip::render_comet()
 {
-    // A bright head dwells kCometStep frames per LED and wraps; pixels behind it
-    // fade out, giving a comet with a short tail.
-    const uint32_t pos = (m_tick / kCometStep) % STRIP_NUM_PIXELS;
+    // A fractional head sweeps the ring continuously; each LED lights by how far it
+    // sits *behind* the head (wrapped), so the comet glides with a fading tail
+    // instead of hopping LED-to-LED.
+    const float speed = (float)STRIP_NUM_PIXELS / kCometFramesPerLoop;
+    const float head = fmodf((float)m_tick * speed, (float)STRIP_NUM_PIXELS);
     for (size_t i = 0; i < STRIP_NUM_PIXELS; i++) {
-        const uint32_t behind = (pos + STRIP_NUM_PIXELS - i) % STRIP_NUM_PIXELS;
-        int lvl = 255 - (int)behind * kCometFade;
-        if (lvl < 0) {
-            lvl = 0;
+        float behind = head - (float)i;
+        if (behind < 0.0f) {
+            behind += (float)STRIP_NUM_PIXELS;   // wrap: distance behind the head
         }
-        m_pixels[i] = scale_rgb(m_color, (uint8_t)lvl);
+        float factor = 1.0f - behind / kCometTail;
+        if (factor < 0.0f) {
+            factor = 0.0f;
+        }
+        m_pixels[i] = scale_rgb(m_color, (uint8_t)(factor * 255.0f));
     }
     commit();
 }
