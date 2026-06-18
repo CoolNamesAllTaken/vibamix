@@ -28,7 +28,7 @@ struct __packed bl_slot_meta {
 	uint8_t  valid;      /* 1 = an OTA wrote+CRC-verified this slot */
 	uint8_t  confirmed;  /* 1 = the app booted healthily from this slot */
 	uint8_t  attempts;   /* trial boots since last confirm */
-	uint8_t  rsvd;
+	uint8_t  stale;      /* 1 = superseded by a newer install (still bootable, deprioritized) */
 };
 
 struct __packed bl_state_rec {

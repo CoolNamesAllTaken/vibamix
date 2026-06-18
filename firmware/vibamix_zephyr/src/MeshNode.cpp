@@ -111,10 +111,11 @@ int MeshNode::init(GUI *gui, LEDStrip *leds)
     hwinfo_get_device_id(s_dev_uuid, sizeof(s_dev_uuid));
     uint16_t addr = app_identity_addr();
 
+    static const uint8_t app_key[16] = VIBAMIX_APP_KEY;
+
     if (!bt_mesh_is_provisioned()) {
         static const uint8_t net_key[16] = VIBAMIX_NET_KEY;
         static const uint8_t dev_key[16] = VIBAMIX_DEV_KEY;
-        static const uint8_t app_key[16] = VIBAMIX_APP_KEY;
 
         err = bt_mesh_provision(net_key, VIBAMIX_NET_IDX, 0 /*flags*/, 0 /*iv*/,
                                 addr, dev_key);
@@ -122,10 +123,24 @@ int MeshNode::init(GUI *gui, LEDStrip *leds)
             printk("Self-provision failed (err %d)\n", err);
             return err;
         }
-        bt_mesh_app_key_add(VIBAMIX_APP_IDX, VIBAMIX_NET_IDX, app_key);
         printk("Self-provisioned at unicast 0x%04x\n", addr);
     } else {
         printk("Already provisioned (restored from settings)\n");
+    }
+
+    // Ensure the shared app key is bound — every boot, not just on first
+    // provision. A node can be "provisioned" in persisted settings yet be
+    // missing the AppKey record (e.g. the original add failed, or settings were
+    // partially written), which leaves the gateway TX path failing forever with
+    // "Unknown AppKey 0x000" (-EINVAL). bt_mesh_app_key_add() is idempotent: it
+    // returns STATUS_IDX_ALREADY_STORED for a matching key.
+    if (!bt_mesh_app_key_exists(VIBAMIX_APP_IDX)) {
+        uint8_t st = bt_mesh_app_key_add(VIBAMIX_APP_IDX, VIBAMIX_NET_IDX, app_key);
+        if (st) {
+            printk("App key add failed (status 0x%02x)\n", st);
+        } else {
+            printk("App key 0x%03x added\n", VIBAMIX_APP_IDX);
+        }
     }
 
     // Stand in for the Config Client: bind the app key and join the group.

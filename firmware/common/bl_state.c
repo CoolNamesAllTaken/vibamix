@@ -115,18 +115,6 @@ static int rmw(int slot, void (*mut)(struct bl_slot_meta *))
 	return bl_state_append(&r);
 }
 
-static int g_version;
-static uint32_t g_image_len;
-
-static void mut_pending(struct bl_slot_meta *m)
-{
-	m->image_len = g_image_len;
-	m->version = g_version;
-	m->valid = 1;
-	m->confirmed = 0;
-	m->attempts = 0;
-}
-
 static void mut_confirm(struct bl_slot_meta *m)
 {
 	m->valid = 1;
@@ -141,9 +129,32 @@ static void mut_attempt(struct bl_slot_meta *m)
 
 int bl_state_set_pending(int slot, uint32_t version, uint32_t image_len)
 {
-	g_version = version;
-	g_image_len = image_len;
-	return rmw(slot, mut_pending);
+	struct bl_state_rec r;
+
+	if (slot < 0 || slot >= BL_NUM_SLOTS) {
+		return -1;
+	}
+	if (bl_state_read(&r) != 0) {
+		memset(&r, 0, sizeof(r));
+	}
+
+	/* The freshly-installed slot: pending trial, not stale. */
+	r.slot[slot].image_len = image_len;
+	r.slot[slot].version = version;
+	r.slot[slot].valid = 1;
+	r.slot[slot].confirmed = 0;
+	r.slot[slot].attempts = 0;
+	r.slot[slot].stale = 0;
+
+	/* Every other (superseded) slot becomes stale so the bootloader prefers the
+	 * new image. Stale slots stay bootable as a revert/fallback target. */
+	for (int s = 0; s < BL_NUM_SLOTS; s++) {
+		if (s != slot) {
+			r.slot[s].stale = 1;
+		}
+	}
+
+	return bl_state_append(&r);
 }
 
 int bl_state_confirm(int slot)

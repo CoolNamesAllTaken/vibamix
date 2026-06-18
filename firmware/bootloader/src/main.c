@@ -201,10 +201,15 @@ int main(void)
 	bool have = (bl_state_read(&rec) == 0);
 
 	int choice = -1;
-	uint32_t best_ver = 0;
 	bool choice_trial = false;
 
 	if (have) {
+		/* Prefer the not-stale slot (the most recently installed image); a stale
+		 * slot stays bootable as a revert/fallback target. Iterating low->high and
+		 * only switching to a later slot when it is fresh and the incumbent is
+		 * stale yields: prefer not-stale, and on a tie (both stale or both fresh)
+		 * keep the lower index -> slot 0 (A). Selection is version-independent so
+		 * equal-version A/B bundles install correctly. */
 		for (int s = 0; s < BL_NUM_SLOTS; s++) {
 			const struct bl_slot_meta *m = &rec.slot[s];
 			uint32_t ver = 0;
@@ -222,9 +227,8 @@ int main(void)
 				printk("bl: slot %d unconfirmed + out of attempts\n", s);
 				continue;
 			}
-			if (choice < 0 || ver >= best_ver) {
+			if (choice < 0 || (!m->stale && rec.slot[choice].stale)) {
 				choice = s;
-				best_ver = ver;
 				choice_trial = !m->confirmed;
 			}
 		}
