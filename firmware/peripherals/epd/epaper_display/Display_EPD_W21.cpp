@@ -8,6 +8,20 @@ void delay_xms(unsigned int xms)
 	k_msleep(xms);
 }
 
+// Reset the RAM X/Y address counters to the origin (0,0). Every RAM stream must do
+// this so full refreshes, the partial base map, and the 4-gray planes all start from
+// the SAME origin — otherwise a render inherits whatever counter the previous update
+// left and lands 1-2px off (the "shift after first render" bug). These are exactly the
+// bytes EPD_Display_Partial already relies on.
+static void EPD_ResetRamCounter(void)
+{
+	Epaper_Write_Command(0x4E); // RAM x address counter = 0
+	Epaper_Write_Data(0x00);
+	Epaper_Write_Command(0x4F); // RAM y address counter = 0
+	Epaper_Write_Data(0x00);
+	Epaper_Write_Data(0x00);
+}
+
 void EPD_Display(unsigned char *Image)
 {
 	uint8_t tempData;
@@ -78,16 +92,6 @@ void EPD_Display_Partial(const unsigned char *Image)
 	delay_xms(10);
 	EPD_W21_RST_1;
 	delay_xms(10);
-
-	// SWRESET, exactly as EPD_HW_Init does it. The base map is drawn in the post-
-	// SWRESET state; a bare hardware reset without this leaves the gate/RAM
-	// addressing one line off, so the first partial lands 1px left of the base map
-	// (canvas X = the panel gate axis under ROTATE_270). SWRESET preserves RAM (the
-	// base map's two banks survive) and clears the full-refresh border/VCOM — which
-	// is what the washout fix wanted — so it keeps that fix and removes the shift.
-	Epaper_READBUSY();
-	Epaper_Write_Command(0x12); // SWRESET
-	Epaper_READBUSY();
 
 	Epaper_Write_Command(0x3C); // BorderWaveform
 	Epaper_Write_Data(0x80);    // partial-mode border
@@ -179,6 +183,167 @@ void EPD_HW_Init_Fast(void)
 	Epaper_Write_Data(0x91);
 	Epaper_Write_Command(0x20);
 	Epaper_READBUSY();
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// 4-level grayscale support (SSD1680). The panel ships as B/W (OTP waveform only),
+// but the controller can render 4 grays from a custom 153-byte waveform LUT loaded
+// via command 0x32 plus two bitplanes written to RAM 0x26 (MSB) and 0x24 (LSB).
+// LUT + voltages are adapted from the GxEPD2_4G SSD1680 reference (GDEY0213B74) —
+// same controller, different resolution. May need on-hardware tuning for this panel.
+static const unsigned char lut_4Gray[153] = {
+	0x40, 0x48, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x08, 0x48, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x02, 0x48, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x20, 0x48, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x0A, 0x19, 0x00, 0x03, 0x08, 0x00, 0x00,
+	0x14, 0x01, 0x00, 0x14, 0x01, 0x00, 0x03,
+	0x0A, 0x03, 0x00, 0x08, 0x19, 0x00, 0x00,
+	0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x00, 0x00, 0x00,
+};
+
+void EPD_Init_4Gray(void)
+{
+	unsigned int i;
+
+	EPD_W21_RST_0; // Module reset
+	delay_xms(10);
+	EPD_W21_RST_1;
+	delay_xms(10);
+
+	Epaper_READBUSY();
+	Epaper_Write_Command(0x12); // SWRESET
+	Epaper_READBUSY();
+
+	Epaper_Write_Command(0x01); // Driver output control: 264 gate lines (264-1=0x107)
+	Epaper_Write_Data(0x07);
+	Epaper_Write_Data(0x01);
+	Epaper_Write_Data(0x00);
+
+	Epaper_Write_Command(0x11); // Data entry mode: X+ Y+
+	Epaper_Write_Data(0x03);
+
+	// Full-panel RAM window so each 5808-byte plane write wraps back to (0,0) —
+	// the same behaviour EPD_SetBaseMap relies on when it fills both banks.
+	Epaper_Write_Command(0x44); // RAM X start/end (bytes): 0..21
+	Epaper_Write_Data(0x00);
+	Epaper_Write_Data(0x15);
+	Epaper_Write_Command(0x45); // RAM Y start/end (lines): 0..263
+	Epaper_Write_Data(0x00);
+	Epaper_Write_Data(0x00);
+	Epaper_Write_Data(0x07);
+	Epaper_Write_Data(0x01);
+	Epaper_Write_Command(0x4E); // RAM X counter = 0
+	Epaper_Write_Data(0x00);
+	Epaper_Write_Command(0x4F); // RAM Y counter = 0
+	Epaper_Write_Data(0x00);
+	Epaper_Write_Data(0x00);
+
+	// 4-gray analog/digital blocks + drive voltages (reference values).
+	// --- Grain-tuning knobs (this panel isn't rated for gray; iterate on hardware) ---
+	//   VCOM (0x2C=0x1C): centers the gray; nudge a few counts if mid-grays are blotchy.
+	//   VSH1/VSH2/VSL (0x04): drive strength; stronger drive develops gray more uniformly.
+	//   lut_4Gray group-timing rows (the 0x0A,0x19,... section): longer gray phases let the
+	//     particles settle — the most impactful knob on the residual "X" grain.
+	Epaper_Write_Command(0x74);
+	Epaper_Write_Data(0x54);
+	Epaper_Write_Command(0x7E);
+	Epaper_Write_Data(0x3B);
+	Epaper_Write_Command(0x2C); // VCOM
+	Epaper_Write_Data(0x1C);
+	Epaper_Write_Command(0x3F); // EOPQ (LUT tail)
+	Epaper_Write_Data(0x22);
+	Epaper_Write_Command(0x03); // VGH
+	Epaper_Write_Data(0x17);
+	Epaper_Write_Command(0x04); // VSH1, VSH2, VSL
+	Epaper_Write_Data(0x41);
+	Epaper_Write_Data(0x00);
+	Epaper_Write_Data(0x32);
+	Epaper_Write_Command(0x3C); // BorderWaveform
+	Epaper_Write_Data(0x00);
+	Epaper_Write_Command(0x21); // Display update control 1 (use both RAM banks)
+	Epaper_Write_Data(0x00);
+	Epaper_Write_Data(0x80);
+
+	Epaper_Write_Command(0x32); // Write the 4-gray waveform LUT
+	for (i = 0; i < sizeof(lut_4Gray); i++) {
+		Epaper_Write_Data(lut_4Gray[i]);
+	}
+	Epaper_READBUSY();
+}
+
+// Write one 5808-byte bitplane to the given RAM bank (0x24 or 0x26), reusing the
+// same row-reversal as EPD_Display so a plane built with the framebuffer layout
+// keeps its orientation. No update is triggered (call EPD_Update_4Gray after both).
+void EPD_WritePlane(unsigned char ram_cmd, const unsigned char *plane)
+{
+	EPD_ResetRamCounter(); // start each plane at origin so 0x26 (MSB) and 0x24 (LSB) align
+	Epaper_Write_Command(ram_cmd);
+	Epaper_Write_RowReversed(plane);
+}
+
+// 4-gray refresh: 0x22=0xC7 keeps the LUT we loaded via 0x32 (unlike EPD_Update's
+// 0xF7, which would reload the OTP waveform and clobber it).
+void EPD_Update_4Gray(void)
+{
+	Epaper_Write_Command(0x22);
+	Epaper_Write_Data(0xC7);
+	Epaper_Write_Command(0x20);
+	Epaper_READBUSY();
+}
+
+// Switch the controller back to the B/W waveform after a 4-gray render, so the gray
+// waveform is only ever active while a grayscale image is on screen. EPD_Init_4Gray
+// leaves custom analog config set (VCOM 0x2C, VGH 0x03, VSH/VSL 0x04, border 0x3C,
+// update-control 0x21, gray LUT 0x32); without this, the next B/W partial refresh
+// (e.g. the config countdown) would run on the gray waveform and scramble. The HW
+// reset + SWRESET restores those parameters to their defaults while preserving RAM
+// and the bistable image on the panel (no display-update is issued here, so the gray
+// image stays up). The next B/W refresh reloads the OTP LUT, dropping the gray LUT.
+void EPD_Restore_BW(void)
+{
+	EPD_HW_Init();
+}
+
+// Fill RAM bank 0x24 with a constant byte and full-refresh. 0xFF = white, 0x00 = black.
+static void EPD_FullFill(unsigned char value)
+{
+	unsigned int i;
+
+	Epaper_Write_Command(0x24);
+	for (i = 0; i < 5808; i++) {
+		Epaper_Write_Data(value);
+	}
+	EPD_Update();
+}
+
+// Condition the panel before a 4-gray render. The gray LUT is a "from white"
+// waveform, so every pixel must start from a uniform saturated state or the gray
+// develops unevenly and leaves a structured residual ("tiny X" grain). A
+// white->black->white wipe exercises every pixel and clears residual charge; pass
+// a lighter strength to trade thoroughness for speed/flashing:
+//   0 = none, 1 = single white flush, 2 = white->black->white.
+void EPD_Condition_4Gray(unsigned char strength)
+{
+	if (strength == 0) {
+		return;
+	}
+	EPD_HW_Init(); // OTP B/W waveform for the clear refreshes
+	if (strength >= 2) {
+		EPD_FullFill(0xFF); // white
+		EPD_FullFill(0x00); // black
+	}
+	EPD_FullFill(0xFF); // white (uniform start state for the gray waveform)
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////

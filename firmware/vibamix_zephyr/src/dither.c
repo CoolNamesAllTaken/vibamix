@@ -45,3 +45,34 @@ void dither_2bit_to_fb(const uint8_t *src, uint16_t w, uint16_t h, uint8_t *fb)
 		}
 	}
 }
+
+void gray2_to_plane(const uint8_t *src, uint16_t w, uint16_t h, uint8_t *plane, int which)
+{
+	/* RAM bit 1 = waveform "condition false"; we clear bits where it's true. This is
+	 * the inverse polarity of the B/W framebuffer, matching the reference's ~out_byte. */
+	memset(plane, 0xFF, FB_BYTES);
+
+	if (w > CANVAS_W) {
+		w = CANVAS_W;
+	}
+	if (h > CANVAS_H) {
+		h = CANVAS_H;
+	}
+
+	for (uint16_t dy = 0; dy < h; dy++) {
+		for (uint16_t dx = 0; dx < w; dx++) {
+			uint32_t pi = (uint32_t)dy * w + dx;
+			uint8_t  shift = (uint8_t)((3 - (pi & 3)) * 2);
+			uint8_t  val = (uint8_t)((src[pi >> 2] >> shift) & 0x3);
+
+			/* which==0 -> MSB plane (RAM 0x26); which==1 -> LSB plane (RAM 0x24).
+			 * level 0=black .. 3=white: white clears both planes, black clears
+			 * neither, the two mids clear exactly one (4 LUT waveforms -> 4 grays). */
+			int cond = which ? (val & 1) : ((val >> 1) & 1);
+			if (cond) {
+				int idx = (CANVAS_W - 1 - dx) * WIDTH_BYTE + (dy >> 3);
+				plane[idx] &= (uint8_t)~(0x80 >> (dy & 7));
+			}
+		}
+	}
+}

@@ -18,18 +18,18 @@
                 "set remote hardware-breakpoint-limit 8",
                 "load",
                 "monitor reset halt",
-                "hbreak main",
+                "thbreak main",
                 "continue"
             ],
             "overrideRestartCommands": [
                 "monitor reset halt",
-                "hbreak main",
+                "thbreak main",
                 "continue"
             ],
             "overrideResetCommands": [
                 "load",
                 "monitor reset halt",
-                "hbreak main",
+                "thbreak main",
                 "continue"
             ]
         }

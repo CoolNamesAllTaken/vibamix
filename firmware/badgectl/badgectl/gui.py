@@ -66,7 +66,7 @@ QTableView { background: #181b21; gridline-color: #2a2f3a; selection-background-
 QHeaderView::section { background: #20242c; border: none; padding: 4px; color: #9aa4b2; }
 """
 
-KA_FRESH_S = 3.0  # keepalive considered alive if seen within this many seconds
+KA_FRESH_S = 5.0  # link considered alive if any badge activity seen within this many seconds
 
 
 def pil_to_pixmap(pil_img) -> QPixmap:
@@ -102,7 +102,8 @@ class MainWindow(QMainWindow):
         # connection / keepalive state
         self._active: str | None = None     # address of the interactively-connected badge
         self._hb_task: asyncio.Task | None = None
-        self._last_rx = 0.0
+        self._last_rx = 0.0     # last badge->app keepalive notify (for the age label)
+        self._last_link = 0.0   # last successful GATT round-trip (any direction) — link health
         self._batch_running = False
         self._batch_cancel = False
 
@@ -298,10 +299,11 @@ class MainWindow(QMainWindow):
         self.model.refresh_ages()
         if self._active and self.link.connected:
             now = time.monotonic()
-            rx_age = now - self._last_rx
-            self.ka_dot.setStyleSheet("color:#5bd07a;" if rx_age < KA_FRESH_S else "color:#e06c5b;")
+            rx_age = now - self._last_rx                          # true notify age (label)
+            link_age = now - max(self._last_rx, self._last_link)  # any link activity (dot)
+            self.ka_dot.setStyleSheet("color:#5bd07a;" if link_age < KA_FRESH_S else "color:#e06c5b;")
             self.ka_age.setText(f"badge {rx_age:.0f}s")
-            self.model.set_ka(self._active, rx_age)
+            self.model.set_ka(self._active, link_age)
 
     # ---------- connect / keepalive ----------
     async def _connect(self) -> None:
@@ -325,7 +327,7 @@ class MainWindow(QMainWindow):
         await self._start_keepalive()
 
     async def _start_keepalive(self) -> None:
-        self._last_rx = time.monotonic()
+        self._last_rx = self._last_link = time.monotonic()
         try:
             await self.link.subscribe_keepalive(self._on_ka_rx)
         except Exception as e:  # noqa: BLE001
@@ -338,10 +340,13 @@ class MainWindow(QMainWindow):
                 await self.link.send_keepalive()
             except Exception:  # noqa: BLE001
                 break
+            self._last_link = time.monotonic()
             await asyncio.sleep(1.0)
 
     def _on_ka_rx(self, _code: int) -> None:
-        self._last_rx = time.monotonic()
+        now = time.monotonic()
+        self._last_rx = now
+        self._last_link = now
 
     def _stop_keepalive(self) -> None:
         if self._hb_task is not None:
@@ -1032,6 +1037,7 @@ class MainWindow(QMainWindow):
             self._log("Not connected — connect to a config-mode badge to use it as the mesh gateway.")
             return
         await self.link.mesh_tx(keys.vendor_opcode(op) + params)
+        self._last_link = time.monotonic()  # a completed acked write proves the link is up
         self._log(f"mesh op 0x{op:02x} broadcast ({len(params)}B params)")
 
     async def _send_heartbeat(self) -> None:

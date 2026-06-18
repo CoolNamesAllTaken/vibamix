@@ -51,4 +51,11 @@ void identity_countdown_overlay(GUI &gui, const char *name, const char *table,
                                 const char *event_name, int remaining_sec,
                                 int total_sec);
 
+/* Composite a small "asleep" indicator (crescent moon + ascending "z z z") into
+ * the top-right corner of an already-built identity frame (call
+ * identity_screen_draw first, then this, then push a full refresh). Drawn with
+ * white halos so it reads over a blank corner or a dark identity image. Used to
+ * leave the bistable panel showing the badge is in deep sleep. */
+void identity_sleep_overlay(GUI &gui);
+
 #endif /* VIBAMIX_QR_SCREEN_H */

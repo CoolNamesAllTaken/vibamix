@@ -17,6 +17,15 @@ extern "C" {
  */
 void dither_2bit_to_fb(const uint8_t *src, uint16_t w, uint16_t h, uint8_t *fb);
 
+/*
+ * Build one 1bpp bitplane (5808 bytes) for real 4-level grayscale display. Same
+ * source format and panel orientation as dither_2bit_to_fb, but instead of
+ * dithering, emit one bit of each 2-bit pixel: `which`=0 -> MSB plane (RAM 0x26),
+ * `which`=1 -> LSB plane (RAM 0x24). The two planes drive the SSD1680 4-gray
+ * waveform LUT (see EPD_Init_4Gray / EPD_WritePlane). `plane` is fully written.
+ */
+void gray2_to_plane(const uint8_t *src, uint16_t w, uint16_t h, uint8_t *plane, int which);
+
 #ifdef __cplusplus
 }
 #endif

@@ -351,6 +351,29 @@ void identity_countdown_overlay(GUI &gui, const char *name, const char *table,
     draw_identity_countdown(remaining_sec, total_sec);
 }
 
+void identity_sleep_overlay(GUI &gui)
+{
+    uint8_t *fb = gui.framebuffer();
+
+    // Re-bind Paint to the already-built identity frame without clearing it, then
+    // composite a small "asleep" indicator into the top-right corner: a crescent
+    // moon with three ascending z's to its left. Drawn with white halos/backgrounds
+    // so it stays legible whether the corner is blank or under a dark image.
+    Paint_NewImage(fb, EPD_WIDTH, EPD_HEIGHT, ROTATE_270, WHITE);
+
+    // Three ascending z's (small mono font, white box behind each for legibility).
+    Paint_DrawString_EN(202, 26, "z", &Font12, WHITE, BLACK);
+    Paint_DrawString_EN(212, 17, "z", &Font12, WHITE, BLACK);
+    Paint_DrawString_EN(222, 8,  "z", &Font12, WHITE, BLACK);
+
+    // Crescent moon: white halo, black disc, then a white disc offset up-right to
+    // carve the crescent opening (same circle-carve trick as draw_bt_badge).
+    const int mx = kCanvasW - 16, my = 20, r = 11;
+    Paint_DrawCircle(mx, my, r + 2, WHITE, DRAW_FILL_FULL, DOT_PIXEL_1X1);
+    Paint_DrawCircle(mx, my, r, BLACK, DRAW_FILL_FULL, DOT_PIXEL_1X1);
+    Paint_DrawCircle(mx + 5, my - 4, r, WHITE, DRAW_FILL_FULL, DOT_PIXEL_1X1);
+}
+
 void identity_status_screen_draw(GUI &gui, const char *name, const char *table,
                                  int batt_mv, int batt_pct,
                                  int remaining_sec, int total_sec)
@@ -372,7 +395,8 @@ static void draw_gear(int cx, int cy, int r_tip, int hole_r)
 {
     constexpr float kPi = 3.14159265f;
     constexpr int   n_teeth = 8;
-    constexpr float duty = 0.5f;          // solid fraction of each tooth pitch
+    constexpr float duty = 0.5f;          // solid fraction of each tooth pitch at the root
+    constexpr float kTaper = 0.06f;       // how much the tooth narrows from root to tip
     const float r_root = r_tip * 0.74f;
 
     for (int y = cy - r_tip; y <= cy + r_tip; y++) {
@@ -392,8 +416,14 @@ static void draw_gear(int cx, int cy, int r_tip, int hole_r)
                     a += 1.0f;
                 }
                 float frac = a * n_teeth;
-                frac -= (float)(int)frac; // position within this tooth pitch
-                solid = (frac < duty);    // tooth vs gap
+                frac -= (float)(int)frac; // position within this tooth pitch [0,1)
+                // Taper the tooth: shrink its angular half-width with radius so the
+                // side walls converge inward (a real gear tooth) instead of being
+                // radial/constant-width (which flares the tooth wider toward the rim
+                // and meets the tip at an obtuse corner). Centered at frac = duty/2.
+                const float t = (dist - r_root) / (float)(r_tip - r_root); // 0..1
+                const float half = (duty * 0.5f) - kTaper * t;
+                solid = fabsf(frac - duty * 0.5f) < half;
             }
             if (solid) {
                 Paint_SetPixel(x, y, BLACK);

@@ -28,8 +28,10 @@ public:
     LEDStrip *leds() const { return m_leds; }
 
     // Redraw the clean identity frame (name/ID + optional image), full refresh.
-    // Used to rest the bistable panel on a bar-free frame before sleep.
-    void redraw_identity();
+    // Used to rest the bistable panel on a bar-free frame before sleep. When
+    // `sleeping` is set, a small "asleep" indicator (moon + z z z) is composited
+    // into the corner before the refresh.
+    void redraw_identity(bool sleeping = false);
 
     // Called by file-scope C trampolines; not for external use.
     //

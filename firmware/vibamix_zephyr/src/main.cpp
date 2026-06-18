@@ -122,6 +122,66 @@ static void wdt_keepalive_start(void)
 	k_timer_start(&s_wdt_timer, K_SECONDS(2), K_SECONDS(2));
 }
 
+// Put app-owned, non-wake GPIOs into their lowest-power state before System OFF.
+// nRF54L retains GPIO output drive across System OFF, so anything left driven keeps
+// burning current. main() re-drives all of these on the next wake.
+//
+// The user button (P0.00) is NOT touched here — enter_deep_sleep() arms it as the
+// wake source afterwards, so this must run first. The ePaper control pins
+// (CS/DC/RST/BUSY) are deliberately left as the EPD driver left them: the panel is
+// bistable and already in deep sleep, and GUI::init() reconfigures them at boot;
+// disturbing them risks the retained image.
+static void gpio_lowpower_for_sleep(void)
+{
+	// Antenna RF switch (U10): cut control + VDD so the FM8625H powers down
+	// (active-high, so INACTIVE = LOW = off).
+	if (gpio_is_ready_dt(&rf_sw_ctl))
+	{
+		gpio_pin_configure_dt(&rf_sw_ctl, GPIO_OUTPUT_INACTIVE);
+	}
+	if (gpio_is_ready_dt(&rf_sw_pwr))
+	{
+		gpio_pin_configure_dt(&rf_sw_pwr, GPIO_OUTPUT_INACTIVE);
+	}
+	// User status LED off (the WS2812 power gate is cut by LEDStrip::off()).
+	if (gpio_is_ready_dt(&user_led))
+	{
+		gpio_pin_configure_dt(&user_led, GPIO_OUTPUT_INACTIVE);
+	}
+}
+
+// The single deep-sleep (System OFF) path: blank the LEDs, rest the panel on the
+// "asleep" identity frame, power down the non-wake GPIOs, arm the user button as the
+// wake source, then power off. Every non-debugger exit funnels through here so this
+// cleanup can never be skipped.
+static void enter_deep_sleep(void)
+{
+	printk("Entering deep sleep\n");
+
+	// 1. LEDs off, unconditionally — cuts the WS2812 power gate even if the strip
+	//    failed to init (that path leaves the gate driven active otherwise).
+	s_leds.off();
+
+	// 2. Rest the bistable panel on the identity frame with the asleep indicator.
+	s_mesh.redraw_identity(/*sleeping=*/true);
+
+	// 3. Power down the antenna switch + other non-wake GPIOs.
+	gpio_lowpower_for_sleep();
+
+	// 4. Arm the user button as the System OFF wake source — last, so the GPIO
+	//    reconfig above can't disturb its SENSE. Wait for release first so a still-
+	//    held button doesn't immediately re-wake.
+	if (gpio_is_ready_dt(&user_btn))
+	{
+		wait_button_release();
+		gpio_pin_interrupt_configure_dt(&user_btn, GPIO_INT_LEVEL_ACTIVE);
+	}
+
+	// 5. Deep sleep. The ePaper keeps its image with no power. Wake by a button
+	//    press (RESET_LOW_POWER_WAKE) or a reset.
+	sys_poweroff();
+}
+
 int main(void)
 {
 	printk("Starting vibamix\n");
@@ -236,17 +296,9 @@ int main(void)
 
 			k_sleep(K_MSEC(LEDStrip::kFrameMs));
 		}
-		if (leds_ok)
-		{
-			s_leds.off();   // blank the chain + cut the LED power gate
-		}
-		// Rest on a clean, bar-free identity frame before sleeping (the bistable
-		// panel keeps whatever we leave). Skipped on a button press, which goes
-		// straight into config mode and repaints anyway.
-		if (!s_btn_event)
-		{
-			s_mesh.redraw_identity();
-		}
+		// A button press during the window promotes straight into config mode (which
+		// repaints). Otherwise we fall through to enter_deep_sleep(), which blanks the
+		// LEDs and rests the panel on the bar-free "asleep" identity frame.
 		if (s_btn_event)
 		{
 			config_mode = true;
@@ -289,17 +341,9 @@ int main(void)
 		}
 	}
 
-	// Enter deep sleep (System OFF). The ePaper is bistable and keeps its image.
-	// Wait for the button to be released first so we don't sleep with the line
-	// already active (which would immediately re-wake), then arm it as the wake
-	// source. Wake by reset, or by pressing the user button.
-	printk("Entering deep sleep\n");
-	if (btn_ready)
-	{
-		wait_button_release();
-		gpio_pin_interrupt_configure_dt(&user_btn, GPIO_INT_LEVEL_ACTIVE);
-	}
-	sys_poweroff();
+	// Centralized deep-sleep: LEDs off, asleep frame, GPIO power-down, button armed
+	// as the wake source, then System OFF.
+	enter_deep_sleep();
 
 	return 0;
 }

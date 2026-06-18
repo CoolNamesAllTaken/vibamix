@@ -11,6 +11,20 @@
 static constexpr int kCanvasW = EPD_HEIGHT; // 264
 static constexpr int kCanvasH = EPD_WIDTH;  // 176
 
+// Render stored grayscale image slots in real 4-level gray (SSD1680 custom waveform)
+// instead of dithering to 1bpp. Set to 0 to fall back to the dithered B/W path.
+#ifndef VIBAMIX_EPD_4GRAY
+#define VIBAMIX_EPD_4GRAY 1
+#endif
+
+// Pre-condition the panel before each 4-gray render so the "from white" gray waveform
+// starts from a uniform state (kills the structured "tiny X" grain). 0=none,
+// 1=single white flush, 2=white->black->white wipe. 2 is cleanest; drop to 1 if the
+// extra flashing/time isn't worth it.
+#ifndef VIBAMIX_EPD_4GRAY_CLEAR
+#define VIBAMIX_EPD_4GRAY_CLEAR 2
+#endif
+
 void GUI::init()
 {
     EPD_GPIO_Init();
@@ -123,10 +137,26 @@ void GUI::render_image(const uint8_t *buf, size_t len)
 
 void GUI::render_gray2(const uint8_t *src, uint16_t w, uint16_t h)
 {
+#if VIBAMIX_EPD_4GRAY
+    // Real 4-level gray: load the gray waveform LUT, then write the two bitplanes.
+    // m_image is reused for both planes in sequence (no second framebuffer). The
+    // gateway banner is skipped here — it's a 1-bit overlay that has no meaning in
+    // the dual-plane gray RAM, and image pushes are full-screen by design.
+    EPD_Condition_4Gray(VIBAMIX_EPD_4GRAY_CLEAR);  // uniform start state -> less grain
+    EPD_Init_4Gray();
+    gray2_to_plane(src, w, h, m_image, 0);  // MSB plane -> RAM 0x26
+    EPD_WritePlane(0x26, m_image);
+    gray2_to_plane(src, w, h, m_image, 1);  // LSB plane -> RAM 0x24
+    EPD_WritePlane(0x24, m_image);
+    EPD_Update_4Gray();
+    EPD_Restore_BW();  // gray waveform is scoped to this render; leave the panel in B/W mode
+    printk("ePaper 4-gray image displayed\n");
+#else
     dither_2bit_to_fb(src, w, h, m_image);
     gateway_status_overlay(m_image);  // mesh-gateway banner (no-op unless relaying)
     EPD_Display(m_image);  // EPD_Display already triggers a full refresh internally
     printk("ePaper grayscale image displayed\n");
+#endif
 }
 
 void GUI::set_base_map()

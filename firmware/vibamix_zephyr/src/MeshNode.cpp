@@ -156,7 +156,7 @@ void MeshNode::apply_persisted_config()
     }
 }
 
-void MeshNode::redraw_identity()
+void MeshNode::redraw_identity(bool sleeping)
 {
     if (!m_gui) {
         return;
@@ -176,6 +176,9 @@ void MeshNode::redraw_identity()
     m_gui->wake();
     identity_screen_draw(*m_gui, cfg->name, cfg->has_attendee ? cfg->attendee_id : "",
                          img, fmt, w, h);
+    if (sleeping) {
+        identity_sleep_overlay(*m_gui);   // moon + z z z, so the panel rests "asleep"
+    }
     m_gui->set_base_map();   // push the framebuffer to the panel (full refresh)
     m_gui->sleep();
 }

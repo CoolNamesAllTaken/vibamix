@@ -608,28 +608,10 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
     gateway_status_set_active(false);
     stop_fast_adv();
 
-    // Leaving GATT mode: always rest on the clean identity frame (the badge's home
-    // screen), even if a frame/image was shown during the session. The render
-    // buffers are idle now (no transfer in flight), so reuse buf 0 to read the
-    // optional identity image.
-    //
-    // (A successful OTA reboots ~1.2 s after its END write, which preempts this and
-    // keeps the "Rebooting…" screen; a failed OTA falls through to identity here.)
-    {
-        const uint8_t *img = nullptr;
-        uint8_t  ifmt = 0;
-        size_t   ilen = 0;
-        uint16_t iw = 0, ih = 0;
-        if (badge_store_image_read(BADGE_SLOT_IDENTITY, s_render_buf[0],
-                                   sizeof(s_render_buf[0]), &ifmt, &ilen, &iw, &ih) == 0) {
-            img = s_render_buf[0];
-        }
-        gui->wake();
-        identity_screen_draw(*gui, cfg->name, cfg->has_attendee ? cfg->attendee_id : "",
-                             img, ifmt, iw, ih);
-        gui->set_base_map();
-    }
-    gui->sleep();
+    // The caller (main) funnels into enter_deep_sleep() after run() returns, which
+    // rests the panel on the clean identity frame (with the asleep indicator) — so
+    // we don't redraw it here. A successful OTA reboots ~1.2 s after its END write,
+    // preempting that and keeping the "Rebooting…" screen.
 
     // Disconnect cleanly so the peer sees a teardown, not a supervision timeout.
     if (s_conn) {
