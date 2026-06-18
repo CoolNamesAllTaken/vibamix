@@ -41,6 +41,8 @@ public:
     void on_attendee(const char *s, size_t len);
     void on_frame_led(uint8_t kind, uint8_t idx, uint8_t anim,
                       uint8_t r, uint8_t g, uint8_t b);
+    // Gateway bridge: re-originate a vendor-model access payload onto the mesh.
+    void on_mesh_tx(const uint8_t *access, size_t len);
 
 private:
     GUI      *m_gui{nullptr};

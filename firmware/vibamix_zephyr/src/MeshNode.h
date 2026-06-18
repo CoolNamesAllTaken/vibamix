@@ -38,6 +38,10 @@ public:
     void on_show_led(uint8_t anim, uint8_t r, uint8_t g, uint8_t b);
     void on_show_text(const char *title, size_t tlen, const char *body, size_t blen);
 
+    // Config-mode gateway: re-originate a vendor-model access payload (sent by a
+    // GATT-connected app) onto the mesh "all badges" group.
+    void on_mesh_tx(const uint8_t *access, size_t len);
+
     // GATT (individual, persistent) config — reused by the config-mode GATT path.
     void on_set_name(const char *name, size_t len);
     // image_xfer completion: store to `slot` (0xFF = render-only) + render.

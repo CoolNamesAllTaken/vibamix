@@ -129,8 +129,9 @@ int MeshNode::init(GUI *gui, LEDStrip *leds)
     // Stand in for the Config Client: bind the app key and join the group.
     mesh_model_bind_and_subscribe(VIBAMIX_APP_IDX, VIBAMIX_GROUP_ADDR);
 
-    // Advertise the proxy/provisioning GATT service for phone ingress.
-    bt_mesh_prov_enable(BT_MESH_PROV_GATT);
+    // No SIG GATT proxy / PB-GATT: the badge is connectable only in config mode
+    // (button). Mesh messages travel over the advertising bearer; a config-mode
+    // badge gateways injects via mesh_model_send_to_group() (see on_mesh_tx).
 
     return 0;
 }
@@ -229,6 +230,16 @@ void MeshNode::on_show_text(const char *title, size_t tlen, const char *body, si
     m_gui->wake();
     m_gui->show_text(title, body);
     m_gui->sleep();
+}
+
+void MeshNode::on_mesh_tx(const uint8_t *access, size_t len)
+{
+    // Config-mode gateway: forward the app's vendor-model access payload onto the
+    // mesh group. Best-effort (ENOBUFS under heavy chunking is acceptable).
+    int err = mesh_model_send_to_group(access, len);
+    if (err) {
+        printk("mesh tx failed (%d)\n", err);
+    }
 }
 
 void MeshNode::on_set_attendee_id(const char *id, size_t len)

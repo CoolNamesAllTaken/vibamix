@@ -2,7 +2,9 @@
 #include "app_config.h"
 #include "badge_store.h"
 #include "image_xfer.h"
+#include "mesh_keys.h"
 
+#include <errno.h>
 #include <string.h>
 #include <zephyr/bluetooth/mesh.h>
 #include <zephyr/sys/printk.h>
@@ -191,6 +193,11 @@ const struct bt_mesh_comp *mesh_model_comp(void)
 	return &comp;
 }
 
+/* Bound app key + group, remembered so the gateway path can originate to them. */
+static uint16_t s_net_idx;
+static uint16_t s_app_idx;
+static uint16_t s_group_addr;
+
 void mesh_model_bind_and_subscribe(uint16_t app_idx, uint16_t group_addr)
 {
 	/* The keys[]/groups[] arrays are allocated by BT_MESH_MODEL_VND_CB; writing
@@ -198,5 +205,28 @@ void mesh_model_bind_and_subscribe(uint16_t app_idx, uint16_t group_addr)
 	 * Sized by CONFIG_BT_MESH_MODEL_KEY_COUNT / _GROUP_COUNT in prj.conf. */
 	vnd_models[0].keys[0] = app_idx;
 	vnd_models[0].groups[0] = group_addr;
+	s_net_idx = VIBAMIX_NET_IDX;
+	s_app_idx = app_idx;
+	s_group_addr = group_addr;
 	printk("mesh: bound app_idx %u, subscribed group 0x%04x\n", app_idx, group_addr);
+}
+
+int mesh_model_send_to_group(const uint8_t *access, size_t len)
+{
+	/* `access` is a complete vendor-model access payload (opcode + params). Wrap it
+	 * and publish to the "all badges" group with the app key. The mesh stack handles
+	 * app + network encryption and (if needed) segmentation. */
+	NET_BUF_SIMPLE_DEFINE(buf, BT_MESH_TX_SDU_MAX);
+	struct bt_mesh_msg_ctx ctx = {
+		.net_idx = s_net_idx,
+		.app_idx = s_app_idx,
+		.addr = s_group_addr,
+		.send_ttl = BT_MESH_TTL_DEFAULT,
+	};
+
+	if (len > net_buf_simple_tailroom(&buf)) {
+		return -EMSGSIZE;
+	}
+	net_buf_simple_add_mem(&buf, access, len);
+	return bt_mesh_model_send(&vnd_models[0], &ctx, &buf, NULL, NULL);
 }

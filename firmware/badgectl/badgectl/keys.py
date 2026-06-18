@@ -73,6 +73,7 @@ UUID_IMAGE_FRAME = _u(0x0005)    # image frame: image + LED (indexed)
 UUID_CHR_OTA = _u(0x0009)        # firmware OTA update (trailered direct-XIP image)
 UUID_CHR_OTA_STATUS = _u(0x000A)  # read: active_slot, inactive_slot, le32 version
 UUID_CHR_KEEPALIVE = _u(0x000B)  # write (app->badge) + notify (badge->app), 1 Hz liveness
+UUID_MESH_TX = _u(0x000C)        # write a vendor-model access payload -> gateway re-broadcasts to mesh
 
 # Frame-characteristic op bytes (first byte of a write; mirror config_gatt.c).
 GOP_START = 0x01    # begin chunked payload (image pixels / text body)

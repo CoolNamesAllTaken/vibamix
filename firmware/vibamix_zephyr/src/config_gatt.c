@@ -34,6 +34,7 @@
 #define VBX_UUID_OTA    BT_UUID_128_ENCODE(0xf0de0009, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
 #define VBX_UUID_OTAST  BT_UUID_128_ENCODE(0xf0de000A, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
 #define VBX_UUID_KEEPAL BT_UUID_128_ENCODE(0xf0de000B, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
+#define VBX_UUID_MESHTX BT_UUID_128_ENCODE(0xf0de000C, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)
 
 static const struct bt_uuid_128 vbx_svc_uuid    = BT_UUID_INIT_128(VBX_UUID_SVC);
 static const struct bt_uuid_128 vbx_img_uuid    = BT_UUID_INIT_128(VBX_UUID_IMG);
@@ -43,6 +44,7 @@ static const struct bt_uuid_128 vbx_imgf_uuid   = BT_UUID_INIT_128(VBX_UUID_IMGF
 static const struct bt_uuid_128 vbx_ota_uuid    = BT_UUID_INIT_128(VBX_UUID_OTA);
 static const struct bt_uuid_128 vbx_otast_uuid  = BT_UUID_INIT_128(VBX_UUID_OTAST);
 static const struct bt_uuid_128 vbx_keepal_uuid = BT_UUID_INIT_128(VBX_UUID_KEEPAL);
+static const struct bt_uuid_128 vbx_meshtx_uuid = BT_UUID_INIT_128(VBX_UUID_MESHTX);
 
 /* Op bytes — first byte of a write. */
 #define OP_START   0x01   /* begin a chunked payload (image pixels / text body) */
@@ -587,6 +589,27 @@ static ssize_t otast_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, st, sizeof(st));
 }
 
+/* ====================== mesh TX gateway (f0de000C) ====================== */
+/* The value is a complete vendor-model access payload (3-byte opcode + params).
+ * This config-mode badge re-originates it onto the mesh "all badges" group, so an
+ * app can broadcast to the fleet without the SIG mesh GATT proxy. One write = one
+ * mesh message; chunked broadcasts (image/text) are sent as successive writes. */
+static ssize_t meshtx_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+			    const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
+{
+	if (offset != 0) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+	}
+	if (len < 3) {   /* at least a 3-byte vendor opcode */
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+	}
+	if (s_cb && s_cb->on_mesh_tx) {
+		s_cb->on_mesh_tx((const uint8_t *)buf, len);
+	}
+	note_activity();
+	return len;
+}
+
 /* ====================== keepalive (f0de000B) ====================== */
 /* f0de000B — per-connection keepalive. The laptop writes once a second (app->badge
  * liveness); the badge notifies once a second (badge->app liveness). Payload is a
@@ -628,6 +651,10 @@ BT_GATT_SERVICE_DEFINE(vbx_cfg_svc,
 	BT_GATT_CHARACTERISTIC(&vbx_otast_uuid.uuid,
 			       BT_GATT_CHRC_READ,
 			       BT_GATT_PERM_READ, otast_read, NULL, NULL),
+	/* Mesh-TX gateway: re-originate a vendor-model access payload onto the mesh. */
+	BT_GATT_CHARACTERISTIC(&vbx_meshtx_uuid.uuid,
+			       BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP,
+			       BT_GATT_PERM_WRITE, NULL, meshtx_write, NULL),
 	/* Keepalive — keep these two LAST (see keepalive_write / config_gatt_keepalive_notify). */
 	BT_GATT_CHARACTERISTIC(&vbx_keepal_uuid.uuid,
 			       BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP | BT_GATT_CHRC_NOTIFY,

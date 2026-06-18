@@ -151,11 +151,6 @@ class BadgeLink:
             raise BleakDeviceNotFoundError(address, f"Device {address} is not advertising")
         self.client = BleakClient(dev, timeout=15.0, disconnected_callback=on_disconnect)
         await self.client.connect()
-        # Subscribe proxy Data-Out so the node keeps the proxy link active; ignore RX.
-        try:
-            await self.client.start_notify(keys.UUID_PROXY_DATA_OUT, lambda *_: None)
-        except Exception:
-            pass
 
     async def disconnect(self) -> None:
         if self.client is not None:
@@ -432,6 +427,8 @@ class BadgeLink:
         """Write an app->badge keepalive (write-without-response for speed)."""
         await self._w(keys.UUID_CHR_KEEPALIVE, bytes([code & 0xFF]), response=False)
 
-    # --- mesh proxy ---
-    async def proxy_write(self, pdu: bytes) -> None:
-        await self._w(keys.UUID_PROXY_DATA_IN, pdu, response=False)
+    # --- mesh injection (config-mode gateway) ---
+    async def mesh_tx(self, access: bytes) -> None:
+        """Broadcast a vendor-model access payload (opcode + params) to the fleet.
+        The connected config-mode badge re-originates it onto the mesh group."""
+        await self._w(keys.UUID_MESH_TX, access, response=True)

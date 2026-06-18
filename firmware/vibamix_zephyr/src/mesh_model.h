@@ -44,6 +44,12 @@ const struct bt_mesh_comp *mesh_model_comp(void);
  * standing in for what a Configuration Client would normally do. */
 void mesh_model_bind_and_subscribe(uint16_t app_idx, uint16_t group_addr);
 
+/* Originate a vendor-model message on the mesh: `access` is a ready vendor-model
+ * access payload (3-byte opcode + params), sent to the bound "all badges" group.
+ * Used by the config-mode gateway path (badgectl writes the payload over GATT and
+ * the connected badge re-broadcasts it). Returns 0 on success. */
+int mesh_model_send_to_group(const uint8_t *access, size_t len);
+
 #ifdef __cplusplus
 }
 #endif

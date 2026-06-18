@@ -185,6 +185,11 @@ static void cb_frame_led(uint8_t kind, uint8_t idx, uint8_t anim,
     if (s_self) { s_self->on_frame_led(kind, idx, anim, r, g, b); }
 }
 
+static void cb_mesh_tx(const uint8_t *access, size_t len)
+{
+    if (s_self) { s_self->on_mesh_tx(access, len); }
+}
+
 static void cb_keepalive(uint8_t code)
 {
     ARG_UNUSED(code);
@@ -216,6 +221,7 @@ static const struct config_gatt_callbacks s_gatt_cb = {
     .on_display   = cb_display,
     .on_attendee  = cb_attendee,
     .on_frame_led = cb_frame_led,
+    .on_mesh_tx   = cb_mesh_tx,
     .on_ota_start = cb_ota_start,
     .on_ota_end   = cb_ota_end,
     .on_keepalive = cb_keepalive,
@@ -350,6 +356,15 @@ void ConfigMode::on_frame_led(uint8_t kind, uint8_t idx, uint8_t anim,
 {
     if (m_mesh) {
         m_mesh->on_set_frame_led(kind, idx, anim, r, g, b);
+    }
+    note_activity();
+}
+
+void ConfigMode::on_mesh_tx(const uint8_t *access, size_t len)
+{
+    // This badge is the gateway: re-originate the app's broadcast onto the mesh.
+    if (m_mesh) {
+        m_mesh->on_mesh_tx(access, len);
     }
     note_activity();
 }

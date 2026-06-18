@@ -32,6 +32,8 @@ struct config_gatt_callbacks {
 	void (*on_attendee)(const char *s, size_t len); /* set attendee/table ID */
 	void (*on_frame_led)(uint8_t kind, uint8_t idx, uint8_t anim,
 			     uint8_t r, uint8_t g, uint8_t b);
+	/* Gateway: re-originate a vendor-model access payload onto the mesh group. */
+	void (*on_mesh_tx)(const uint8_t *access, size_t len);
 	void (*on_ota_start)(uint32_t total);  /* OTA began — show "updating" screen */
 	void (*on_ota_end)(bool ok);           /* OTA finished — show "rebooting"/failed */
 	void (*on_keepalive)(uint8_t code);    /* 1 Hz keepalive write from the laptop */

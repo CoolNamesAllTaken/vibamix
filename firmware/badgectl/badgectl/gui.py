@@ -820,24 +820,13 @@ class MainWindow(QMainWindow):
         w = QWidget()
         v = QVBoxLayout(w)
 
-        g = QGroupBox("Routing")
-        gl = QGridLayout(g)
-        self.m_target = QComboBox()
-        self.m_target.addItem("All badges (group 0xC000)", keys.GROUP_ADDR)
-        self.m_target.addItem("Unicast…", -1)
-        self.m_unicast = QLineEdit("0001")
-        self.m_unicast.setFixedWidth(80)
-        self.m_src = QLineEdit("0001")
-        self.m_src.setFixedWidth(80)
-        self.m_seq = QLabel("seq —")
-        gl.addWidget(QLabel("Target"), 0, 0)
-        gl.addWidget(self.m_target, 0, 1)
-        gl.addWidget(QLabel("Unicast (hex)"), 0, 2)
-        gl.addWidget(self.m_unicast, 0, 3)
-        gl.addWidget(QLabel("Src (hex)"), 1, 0)
-        gl.addWidget(self.m_src, 1, 1)
-        gl.addWidget(self.m_seq, 1, 3)
-        v.addWidget(g)
+        info = QLabel(
+            "Broadcasts to ALL badges. Connect to a config-mode badge first (press "
+            "its button) — it acts as the gateway and re-originates these onto the "
+            "mesh. Receiving badges must be awake (boot window or their own config mode).")
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#9aa4b2;")
+        v.addWidget(info)
 
         g = QGroupBox("Event heartbeat (mesh — keep badges awake)")
         gl = QHBoxLayout(g)
@@ -1036,29 +1025,14 @@ class MainWindow(QMainWindow):
             self._hb_timer.stop()
             self._log("Auto event-heartbeat OFF.")
 
-    # mesh helpers
-    def _session(self) -> MeshSession:
-        src = int(self.m_src.text(), 16)
-        if self._seqstore is None or self._seqstore.src != src:
-            self._seqstore = SeqStore(src)
-        return MeshSession(self.crypto, src, self._seqstore)
-
-    def _dst(self) -> int:
-        d = self.m_target.currentData()
-        return int(self.m_unicast.text(), 16) if d == -1 else d
-
+    # mesh helpers — inject via the connected config-mode badge (the gateway),
+    # which re-originates each vendor-model payload onto the mesh group.
     async def _mesh_send(self, op: int, params: bytes) -> None:
         if not self.link.connected:
-            self._log("Not connected (mesh needs a connected proxy badge).")
+            self._log("Not connected — connect to a config-mode badge to use it as the mesh gateway.")
             return
-        sess = self._session()
-        dst = self._dst()
-        access = keys.vendor_opcode(op) + params
-        writes = sess.build(dst, access, self.link.mtu)
-        for pdu in writes:
-            await self.link.proxy_write(pdu)
-        self.m_seq.setText(f"seq {self._seqstore.peek()}")
-        self._log(f"mesh op 0x{op:02x} → 0x{dst:04x} ({len(writes)} proxy PDU(s), {len(params)}B params)")
+        await self.link.mesh_tx(keys.vendor_opcode(op) + params)
+        self._log(f"mesh op 0x{op:02x} broadcast ({len(params)}B params)")
 
     async def _send_heartbeat(self) -> None:
         # Carry the event name (≤8 bytes keeps the access payload unsegmented, so
@@ -1068,7 +1042,8 @@ class MainWindow(QMainWindow):
 
     async def _mesh_show_text(self) -> None:
         # Draw a text frame on every badge (title + chunked body). Ephemeral — the
-        # firmware renders it straight to the panel and never stores it.
+        # firmware renders it straight to the panel and never stores it. Pace the
+        # chunks so the gateway's mesh adv buffers don't overflow.
         await self._mesh_send(keys.OP_SHOW_TEXT_HDR, self.m_scr_hdr.text().encode("utf-8")[:47])
         body = self.m_scr_body.toPlainText().encode("utf-8")
         chunk = 96
@@ -1076,4 +1051,5 @@ class MainWindow(QMainWindow):
         for seq, seg in enumerate(segs):
             last = 1 if seq == len(segs) - 1 else 0
             await self._mesh_send(keys.OP_SHOW_TEXT_BODY, bytes([seq, last]) + seg)
+            await asyncio.sleep(0.03)
         self._log(f"mesh show text sent in {len(segs)} body chunk(s).")
