@@ -20,7 +20,33 @@ static constexpr uint32_t kBlobPeriod = 100;   // frames for one L->R->L bounce 
 static constexpr float    kBlobWidth  = 2.0f;  // blob falloff radius, in LED units
 static constexpr float    kBlobFloor  = 0.10f; // faint floor so the wheel stays visible
 
+// Breathe: triangle-wave brightness period (frames). ~64*40ms ≈ 2.6 s.
+static constexpr uint32_t kBreathePeriod = 64;
+static constexpr uint8_t  kBreatheFloor  = 28;   // dimmest point of the pulse
+// Comet: a fractional head sweeps the ring continuously; brightness falls off with
+// distance behind the head (a short tail), so motion is smooth, not per-LED hops.
+static constexpr float kCometFramesPerLoop = 60.0f;  // frames for one full sweep (~2.4 s)
+static constexpr float kCometTail = 1.8f;            // tail length, in LED units
+// Sparkle: per-frame decay (gentler = smoother fade), dim floor, ~1/N spawn chance.
+static constexpr uint8_t  kSparkDecay = 10;
+static constexpr uint8_t  kSparkFloor = 12;
+
+// Render thread: draws the active pattern at kFrameMs independent of the main /
+// ePaper loop, so a (blocking) panel refresh can't stall the animation.
+K_THREAD_STACK_DEFINE(s_led_stack, 768);
+static struct k_thread s_led_thread;
+
 static const struct device *const s_strip = DEVICE_DT_GET(STRIP_NODE);
+
+// Scale an (already brightness-capped) color by lvl/255.
+static struct led_rgb scale_rgb(struct led_rgb c, uint8_t lvl)
+{
+    struct led_rgb o{};
+    o.r = (uint16_t)c.r * lvl / 255;
+    o.g = (uint16_t)c.g * lvl / 255;
+    o.b = (uint16_t)c.b * lvl / 255;
+    return o;
+}
 
 // WS2812 VDD power gate (P1.07, active-low PMOS); driving it active powers the chain.
 static const struct gpio_dt_spec s_power = GPIO_DT_SPEC_GET(DT_NODELABEL(led_enable), gpios);
@@ -58,8 +84,34 @@ int LEDStrip::init()
         printk("LED strip device not ready\n");
         return -ENODEV;
     }
+
+    // Drive rendering from a dedicated, steady-cadence thread so the ePaper's
+    // (blocking) refreshes on the main thread don't freeze the animation.
+    m_powered = true;
+    k_thread_create(&s_led_thread, s_led_stack, K_THREAD_STACK_SIZEOF(s_led_stack),
+                    LEDStrip::thread_entry, this, NULL, NULL,
+                    K_PRIO_PREEMPT(10), 0, K_NO_WAIT);
+    k_thread_name_set(&s_led_thread, "led");
+
     printk("LED strip ready (%d pixels)\n", STRIP_NUM_PIXELS);
     return 0;
+}
+
+void LEDStrip::thread_entry(void *a, void *b, void *c)
+{
+    ARG_UNUSED(b);
+    ARG_UNUSED(c);
+    static_cast<LEDStrip *>(a)->render_loop();
+}
+
+void LEDStrip::render_loop()
+{
+    for (;;) {
+        if (m_powered) {
+            render();
+        }
+        k_sleep(K_MSEC(kFrameMs));
+    }
 }
 
 void LEDStrip::set_pattern(LedPattern pattern)
@@ -69,12 +121,41 @@ void LEDStrip::set_pattern(LedPattern pattern)
 
 void LEDStrip::set_color(uint8_t r, uint8_t g, uint8_t b)
 {
+    set_anim(LedPattern::Solid, r, g, b);
+}
+
+void LEDStrip::set_anim(LedPattern pattern, uint8_t r, uint8_t g, uint8_t b)
+{
     // Scale to the same brightness cap the animations use (~25%) to keep current
     // and glare down across the 4-LED chain.
     m_color.r = (uint16_t)r * kBrightness / 255;
     m_color.g = (uint16_t)g * kBrightness / 255;
     m_color.b = (uint16_t)b * kBrightness / 255;
-    m_pattern = LedPattern::Solid;
+    m_pattern = pattern;
+}
+
+uint32_t LEDStrip::rand_next()
+{
+    uint32_t x = m_rng;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    m_rng = x ? x : 0x1234abcdu;
+    return m_rng;
+}
+
+LedPattern led_pattern_from_code(uint8_t code)
+{
+    switch (code) {
+    case (uint8_t)LedPattern::Off:     return LedPattern::Off;
+    case (uint8_t)LedPattern::Solid:   return LedPattern::Solid;
+    case (uint8_t)LedPattern::Rainbow: return LedPattern::Rainbow;
+    case (uint8_t)LedPattern::Wheel:   return LedPattern::Wheel;
+    case (uint8_t)LedPattern::Breathe: return LedPattern::Breathe;
+    case (uint8_t)LedPattern::Comet:   return LedPattern::Comet;
+    case (uint8_t)LedPattern::Sparkle: return LedPattern::Sparkle;
+    default:                           return LedPattern::Solid;
+    }
 }
 
 void LEDStrip::render()
@@ -83,28 +164,39 @@ void LEDStrip::render()
     case LedPattern::Solid:   render_solid();   break;
     case LedPattern::Rainbow: render_rainbow(); break;
     case LedPattern::Wheel:   render_wheel();   break;
+    case LedPattern::Breathe: render_breathe(); break;
+    case LedPattern::Comet:   render_comet();   break;
+    case LedPattern::Sparkle: render_sparkle(); break;
     case LedPattern::Off:
     default:                  render_off();     break;
     }
     m_tick++;
 }
 
-void LEDStrip::off()
+void LEDStrip::power_on()
 {
-    // Push black out first (while still powered), then cut the power gate so
-    // the WS2812 VDD rail collapses and the chain draws no current in sleep.
-    m_pattern = LedPattern::Off;
-    render_off();
-    gpio_pin_set_dt(&s_power, 0);   // logical 0 = inactive = PMOS off (active-low gate)
+    // Re-enable the active-low PMOS gate so the WS2812 VDD rail is restored after
+    // a prior off() (which cut it). The render thread resumes lighting the chain.
+    gpio_pin_configure_dt(&s_power, GPIO_OUTPUT_ACTIVE);
+    m_powered = true;
 }
 
-void LEDStrip::play_for(uint32_t duration_ms)
+void LEDStrip::off()
 {
-    const int64_t deadline = k_uptime_get() + duration_ms;
-    while (k_uptime_get() < deadline) {
-        render();
-        k_sleep(K_MSEC(kFrameMs));
+    // Stop the render thread committing, push black out (while still powered), then
+    // float the power gate to high impedance so the WS2812 VDD rail collapses and the
+    // chain draws no current. The PMOS gate has an external pull-up, so disconnecting the
+    // pin (rather than actively driving it) pulls the gate high = PMOS off, and that holds
+    // through System OFF where a driven output isn't reliably retained. Safe to call even
+    // if init() failed (e.g. the strip device never came up): skip the black-out commit in
+    // that case, but ALWAYS float the gate — init() drives it active before the strip-ready
+    // check, so this is the one operation that must run to leave the rail off before sleep.
+    m_powered = false;
+    m_pattern = LedPattern::Off;
+    if (device_is_ready(s_strip)) {
+        render_off();
     }
+    gpio_pin_configure_dt(&s_power, GPIO_DISCONNECTED);   // high-Z; external pull-up -> PMOS off
 }
 
 void LEDStrip::render_off()
@@ -158,6 +250,58 @@ void LEDStrip::render_wheel()
         }
         const uint8_t val = (uint8_t)(kBrightness * factor);
         m_pixels[i] = hsv_to_rgb(hue, val);
+    }
+    commit();
+}
+
+void LEDStrip::render_breathe()
+{
+    // Triangle-wave brightness from kBreatheFloor..255 over kBreathePeriod frames.
+    const uint32_t c    = m_tick % kBreathePeriod;
+    const uint32_t half = kBreathePeriod / 2;
+    const uint32_t tri  = (c < half) ? c : (kBreathePeriod - c);  // 0..half
+    const uint8_t lvl = (uint8_t)(kBreatheFloor +
+                                  (uint32_t)(255 - kBreatheFloor) * tri / half);
+    const struct led_rgb px = scale_rgb(m_color, lvl);
+    for (size_t i = 0; i < STRIP_NUM_PIXELS; i++) {
+        m_pixels[i] = px;
+    }
+    commit();
+}
+
+void LEDStrip::render_comet()
+{
+    // A fractional head sweeps the ring continuously; each LED lights by how far it
+    // sits *behind* the head (wrapped), so the comet glides with a fading tail
+    // instead of hopping LED-to-LED.
+    const float speed = (float)STRIP_NUM_PIXELS / kCometFramesPerLoop;
+    const float head = fmodf((float)m_tick * speed, (float)STRIP_NUM_PIXELS);
+    for (size_t i = 0; i < STRIP_NUM_PIXELS; i++) {
+        float behind = head - (float)i;
+        if (behind < 0.0f) {
+            behind += (float)STRIP_NUM_PIXELS;   // wrap: distance behind the head
+        }
+        float factor = 1.0f - behind / kCometTail;
+        if (factor < 0.0f) {
+            factor = 0.0f;
+        }
+        m_pixels[i] = scale_rgb(m_color, (uint8_t)(factor * 255.0f));
+    }
+    commit();
+}
+
+void LEDStrip::render_sparkle()
+{
+    // Decay each pixel, occasionally relight a random one to full, keep a dim floor.
+    for (size_t i = 0; i < STRIP_NUM_PIXELS; i++) {
+        m_level[i] = (m_level[i] > kSparkDecay) ? (uint8_t)(m_level[i] - kSparkDecay) : 0;
+    }
+    if ((rand_next() & 0x7) == 0) {
+        m_level[rand_next() % STRIP_NUM_PIXELS] = 255;
+    }
+    for (size_t i = 0; i < STRIP_NUM_PIXELS; i++) {
+        const uint8_t lvl = m_level[i] > kSparkFloor ? m_level[i] : kSparkFloor;
+        m_pixels[i] = scale_rgb(m_color, lvl);
     }
     commit();
 }

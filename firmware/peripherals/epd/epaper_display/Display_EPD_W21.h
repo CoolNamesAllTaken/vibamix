@@ -42,6 +42,20 @@ void EPD_Standby(void);
 
 void EPD_HW_Init_Fast(void);
 void EPD_WhiteScreen_ALL_Fast(const unsigned char *datas);
+
+// 4-level grayscale (full refresh only). The SSD1680 renders 4 grays from a custom
+// waveform LUT (cmd 0x32) + two bitplanes: MSB plane -> RAM 0x26, LSB plane -> 0x24.
+// Usage: EPD_Init_4Gray(); EPD_WritePlane(0x26, msb); EPD_WritePlane(0x24, lsb);
+// EPD_Update_4Gray();  (planes built by gray2_to_plane() in dither.c)
+void EPD_Init_4Gray(void);
+void EPD_WritePlane(unsigned char ram_cmd, const unsigned char *plane);
+void EPD_Update_4Gray(void);
+// Pre-condition the panel before a 4-gray render (the gray LUT is a "from white"
+// waveform). strength: 0=none, 1=single white flush, 2=white->black->white wipe.
+void EPD_Condition_4Gray(unsigned char strength);
+// Restore the B/W waveform after a 4-gray render so subsequent B/W refreshes (incl.
+// the partial-refresh countdown) don't inherit the gray waveform/voltages.
+void EPD_Restore_BW(void);
 #endif
 /***********************************************************
 						end file

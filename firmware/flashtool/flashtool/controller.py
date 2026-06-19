@@ -11,7 +11,7 @@ import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-from . import builder, config, flasher, usb_topology
+from . import builder, config, flasher, serial_registry, usb_topology
 from .models import Slot, Status
 
 # Event keys posted to the GUI event loop.
@@ -32,6 +32,11 @@ class Controller:
         self._relative_map: dict[int, str] | None = config.RELATIVE_MAP
         self._hub_roots: list[str] = []
         self.firmware: str | None = None  # path to the hex to flash; set by build or browse
+        # True while a Flash All run is in progress. Pauses the hotplug monitor so
+        # the probe-rs post-flash reset (which makes each board re-enumerate) cannot
+        # swap self.slots out from under the running workers — otherwise the last
+        # board's completion renders against a freshly re-bound IDLE slot.
+        self._flashing: bool = False
 
     @property
     def num_hubs(self) -> int:
@@ -70,7 +75,7 @@ class Controller:
         return self.slots
 
     def resolve_firmware(self) -> str:
-        """Return the firmware path to flash.
+        """Return the app firmware path to flash.
 
         Uses ``self.firmware`` if set (by a build or Browse), otherwise falls
         back to the newest hex found in ``config.ARTIFACT_DIR``.
@@ -88,41 +93,60 @@ class Controller:
             )
         return str(matches[-1])
 
+    def resolve_images(self) -> list[str]:
+        """Return the ordered list of images to flash: bootloader, then app.
+
+        A factory board needs both — the bootloader at 0x0 and the app in slot A.
+        Raises ``FileNotFoundError`` if either is missing.
+        """
+        if not config.BOOTLOADER_HEX.exists():
+            raise FileNotFoundError(
+                f"No bootloader hex at {config.BOOTLOADER_HEX} — click Build "
+                f"(builds bootloader + app)"
+            )
+        return [str(config.BOOTLOADER_HEX), self.resolve_firmware()]
+
     def flash_all(self, window) -> None:
         """Kick off flashing every present slot without blocking the GUI."""
         try:
-            firmware = self.resolve_firmware()
+            images = self.resolve_images()
         except FileNotFoundError as exc:
             window.write_event_value(EVT_ALL_DONE, {"error": str(exc)})
             return
         present = [s for s in self.slots if s.device is not None]
         if not present:
             return
+        self._flashing = True
         for s in present:
             s.status = Status.FLASHING
         window.write_event_value(EVT_HOTPLUG, list(self.slots))
         threading.Thread(
             target=self._run_pool,
-            args=(window, firmware, present),
+            args=(window, images, present),
             daemon=True,
         ).start()
 
-    def _run_pool(self, window, firmware: str, present: list[Slot]) -> None:
+    def _run_pool(self, window, images: list[str], present: list[Slot]) -> None:
         """Dispatcher thread: fan out one worker per slot, bounded pool."""
-        with ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT) as ex:
-            futures = [ex.submit(self._flash_one, window, s, firmware) for s in present]
-            for f in futures:
-                try:
-                    f.result()
-                except Exception:
-                    pass
+        try:
+            with ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT) as ex:
+                futures = [ex.submit(self._flash_one, window, s, images) for s in present]
+                for f in futures:
+                    try:
+                        f.result()
+                    except Exception:
+                        pass
+        finally:
+            # Re-enable hotplug detection only once every worker (and its post-flash
+            # reset) has finished, so a late re-enumeration can't clobber slot state.
+            self._flashing = False
         try:
             window.write_event_value(EVT_ALL_DONE, self._summary())
         except Exception:
             pass
 
-    def _flash_one(self, window, slot: Slot, firmware: str) -> None:
-        """Worker: flash one slot, streaming progress back as GUI events."""
+    def _flash_one(self, window, slot: Slot, images: list[str]) -> None:
+        """Worker: flash one slot (all images), streaming progress back as events."""
         def cb(pct: float, msg: str) -> None:
             slot.progress = pct
             slot.message = msg
@@ -133,11 +157,25 @@ class Controller:
             except Exception:
                 pass
 
-        ok, msg = flasher.flash_device(slot.device, firmware, cb)
-        slot.status = Status.DONE if ok else Status.ERROR
-        slot.message = msg
+        # Assign (or look up) this board's unique 15-bit badge id and write it to
+        # the factory partition as part of this flash.
         try:
-            window.write_event_value(EVT_DEVICE_DONE, (slot.index, ok, msg))
+            factory_id = serial_registry.assign_for(slot.device)
+        except Exception as exc:  # id space exhausted / registry IO error
+            slot.status = Status.ERROR
+            slot.message = f"id assign failed: {exc}"
+            try:
+                window.write_event_value(EVT_DEVICE_DONE,
+                                         (slot.index, False, slot.message))
+            except Exception:
+                pass
+            return
+
+        ok, msg = flasher.flash_device(slot.device, images, cb, factory_id=factory_id)
+        slot.status = Status.DONE if ok else Status.ERROR
+        slot.message = f"{msg} (id {factory_id:04X})" if ok else msg
+        try:
+            window.write_event_value(EVT_DEVICE_DONE, (slot.index, ok, slot.message))
         except Exception:
             pass
 
@@ -148,7 +186,11 @@ class Controller:
         return {"done": done, "error": error, "absent": absent}
 
     def build(self, window) -> None:
-        """Run ``west build`` in a background thread, streaming output as events."""
+        """Build bootloader + app in a background thread, streaming output as events.
+
+        Both must succeed before Flash All is enabled, so a half-built pair can
+        never be flashed. ``EVT_BUILD_DONE`` carries the app hex path.
+        """
         def _run():
             def emit(line: str) -> None:
                 try:
@@ -156,7 +198,11 @@ class Controller:
                 except Exception:
                     pass
 
-            ok = builder.build(on_output=emit)
+            emit("=== Building bootloader ===\n")
+            ok = builder.build_bootloader(on_output=emit)
+            if ok:
+                emit("=== Building application ===\n")
+                ok = builder.build(on_output=emit)
             hex_path = str(builder.firmware_hex()) if ok else None
             if ok and hex_path:
                 self.firmware = hex_path
@@ -180,6 +226,11 @@ class Controller:
         def _poll():
             while True:
                 time.sleep(interval)
+                # Don't touch self.slots during a flash run: probe-rs resets each
+                # board after flashing, which re-enumerates it on USB and would
+                # otherwise trip a rebind that wipes in-flight FLASHING/DONE state.
+                if self._flashing:
+                    continue
                 probes = usb_topology.enumerate_probes()
                 fresh = self._detect_hub_roots(probes)
                 known = set(self._hub_roots)

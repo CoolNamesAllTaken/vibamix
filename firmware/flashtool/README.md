@@ -9,11 +9,14 @@ one or more USB hubs at once, with a live per-slot status display.
 
 ```bash
 # Debian / Ubuntu
-sudo apt install python3-tk libusb-1.0-0
+sudo apt install libusb-1.0-0
 
-# macOS (tkinter ships with the python.org installer)
+# macOS
 brew install libusb
 ```
+
+The GUI uses PyQt6, whose wheel bundles the Qt runtime — no system Qt install
+is required.
 
 ### 2. Install Python dependencies
 
@@ -104,17 +107,26 @@ in while the app is running — the layout expands automatically.
 
 ### Building and flashing
 
-On startup the app looks for a pre-built hex at the default west build output
-path (`firmware/vibamix_zephyr/build/vibamix_zephyr/zephyr/zephyr.hex`). If
-found, **Flash All** is enabled immediately.
+The badge uses a custom direct-XIP A/B bootloader (no MCUboot), so a factory
+board needs **two** images flashed over SWD: the **bootloader** at `0x0`
+(`firmware/bootloader/` → `build/bl/zephyr/zephyr.hex`) and the **app** linked
+into slot A at `0xE000` (`build/zephyr/zephyr.hex`). **Flash All always writes
+both**, bootloader first, to every present board.
+
+On startup the app looks for a pre-built app hex at the default west build
+output path (`firmware/vibamix_zephyr/build/zephyr/zephyr.hex`). If found,
+**Flash All** is enabled immediately (provided the bootloader hex also exists).
 
 To build from source, click **Build** (requires NCS v3.3.1 installed at
-`~/ncs/v3.3.1`). The build runs in the background and automatically loads the
-resulting hex when done.
+`~/ncs/v3.3.1`). It builds the bootloader and then the app in the background and
+loads the resulting app hex when both succeed.
 
-To flash a pre-built hex from elsewhere, click **Browse…** and select the file.
+To flash a pre-built app hex from elsewhere, click **Browse…** and select the
+file; the bootloader still comes from `build/bl/zephyr/zephyr.hex`.
 
-Click **Flash All** to flash every present board in parallel. Status per slot:
+Click **Flash All** to flash every present board in parallel. Each board runs a
+`bootloader:` phase, an `app:` phase, then a `factory id` phase. Status per slot
+(the done message includes the assigned id, e.g. `✓ done (id 0007)`):
 
 | Status | Meaning |
 |--------|---------|
@@ -124,6 +136,21 @@ Click **Flash All** to flash every present board in parallel. Status per slot:
 | `verify…` | Verifying written data |
 | `✓ done` | Flashed successfully |
 | `✗ error` | Flash failed — check the board |
+
+### Per-unit badge ids
+
+Each board is assigned a unique 15-bit id (`0001`..`7FFF`) written to the
+`factory` flash partition after the images. The firmware uses it as the mesh
+unicast address, the config code, and the `vibamix-XXXX` GAP name, so a fleet of
+hundreds of badges doesn't collide (a random device-id slice collides at ~75% for
+300 badges). Ids are handed out sequentially and persisted in
+`flashtool/usb_hubs/serials.json`, keyed by the probe's serial — re-flashing the
+same board reuses its id.
+
+> ⚠️ **Back up `serials.json`.** It is the source of truth for which ids are
+> taken. If it is lost, assignment restarts at `0001` and you can mint duplicate
+> ids on already-flashed badges. A board flashed with plain `west flash` (no
+> factory record) falls back to the legacy device-id-derived code.
 
 ### Re-calibrating
 
@@ -167,10 +194,17 @@ visible (slots go absent) so the layout stays stable while boards are swapped.
 ### Flashing backend
 
 `flasher.py` shells out to **probe-rs** over each board's onboard CMSIS-DAP.
-The backend is isolated behind a single function so it can be swapped for
-nrfutil or J-Link later. Flashing runs in a `ThreadPoolExecutor` (bounded by
-`config.MAX_CONCURRENT`); workers post progress events back to the GUI thread
-via `window.write_event_value`.
+`flash_device` writes an ordered list of images (bootloader, then app) with one
+`probe-rs download` per image and a single reset at the end — probe-rs only
+erases the sectors each image covers, so the non-overlapping bootloader (`0x0`)
+and app (`0xE000`) don't wipe each other. The backend is isolated here so it can
+be swapped for nrfutil or J-Link later. Flashing runs in a `ThreadPoolExecutor`
+(bounded by `config.MAX_CONCURRENT`); workers post progress events back to the
+GUI thread by calling `write_event_value` on a `QtBridge`, which re-emits each
+event as a thread-safe Qt signal (`gui.py`). probe-rs resets each board after flashing, so
+the hotplug monitor is paused for the duration of a run — the reset re-enumerates
+the board on USB, and rebinding mid-run would otherwise wipe its just-finished
+status (this is why the last board used to show as "ready" after a flash).
 
 ---
 
@@ -209,7 +243,7 @@ flashtool/
   usb_topology.py    # USB enumeration, hub root detection, slot building
   flasher.py         # probe-rs backend: flash one device, parse progress
   controller.py      # discovery + concurrent flash dispatch (no GUI deps)
-  gui.py             # FreeSimpleGUI slot grid + event loop
+  gui.py             # PyQt6 slot grid + QtBridge event signal
   calibrate.py       # CLI: build per-slot port map, write bench config
   __main__.py        # entry point: `python -m flashtool`
   usb_hubs/          # bench configs (committed; one file per hub model)

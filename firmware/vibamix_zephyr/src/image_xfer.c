@@ -10,6 +10,8 @@ static image_complete_cb s_cb;
 
 /* Current transfer state. */
 static bool      s_active;
+static uint8_t   s_slot;
+static uint8_t   s_fmt;
 static uint16_t  s_size;     /* expected image byte count */
 static uint16_t  s_width;
 static uint16_t  s_height;
@@ -26,7 +28,8 @@ void image_xfer_set_complete_cb(image_complete_cb cb)
 	s_cb = cb;
 }
 
-void image_xfer_start(uint16_t size, uint16_t width, uint16_t height)
+void image_xfer_start(uint8_t slot, uint8_t fmt, uint16_t size,
+		      uint16_t width, uint16_t height)
 {
 	if (!s_buf || size == 0 || size > s_cap) {
 		printk("img: START rejected (size=%u cap=%u)\n", size, (unsigned)s_cap);
@@ -34,13 +37,15 @@ void image_xfer_start(uint16_t size, uint16_t width, uint16_t height)
 		return;
 	}
 
+	s_slot = slot;
+	s_fmt = fmt;
 	s_size = size;
 	s_width = width;
 	s_height = height;
 	s_received = 0;
 	s_active = true;
 	memset(s_buf, 0, s_cap);
-	printk("img: START size=%u %ux%u\n", size, width, height);
+	printk("img: START slot=%u fmt=%u size=%u %ux%u\n", slot, fmt, size, width, height);
 }
 
 void image_xfer_data(uint16_t offset, const uint8_t *data, uint16_t len)
@@ -85,6 +90,6 @@ void image_xfer_end(uint32_t crc)
 
 	printk("img: END ok, rendering\n");
 	if (s_cb) {
-		s_cb(s_buf, s_size, s_width, s_height);
+		s_cb(s_slot, s_fmt, s_buf, s_size, s_width, s_height);
 	}
 }

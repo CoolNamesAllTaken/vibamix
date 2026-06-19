@@ -11,7 +11,9 @@
 	compatible = "pants_for_birds,vibamix-xiao-cpuapp";
 
 	chosen {
-		zephyr,code-partition = &slot0_partition;
+		/* Default app build links into slot A. The slot-B build overrides this
+		 * via boards/.../slotb.overlay (direct-XIP A/B). */
+		zephyr,code-partition = &slot_a_partition;
 		zephyr,sram = &cpuapp_sram;
 		zephyr,flash = &cpuapp_rram;
 		zephyr,flash-controller = &rram_controller;
@@ -34,6 +36,17 @@
 		vbat_enable: vbat_enable {
 			gpios = <&gpio1 15 GPIO_ACTIVE_HIGH>;  /* P1.15 VBAT_EN */
 		};
+		/* Antenna RF switch (U10, FM8625H). VDD must be powered for the switch
+		 * to pass signal; VCTL selects the port:
+		 *   RF_SW_CTL LOW  -> RF1 -> ANT1 (onboard chip antenna)
+		 *   RF_SW_CTL HIGH -> RF2 -> ANT2 (external antenna)
+		 * Driven active at boot in main() to select the external antenna. */
+		rf_sw_pwr: rf_sw_pwr {
+			gpios = <&gpio2 3 GPIO_ACTIVE_HIGH>;   /* P2.03 RF_SW_PWR */
+		};
+		rf_sw_ctl: rf_sw_ctl {
+			gpios = <&gpio2 5 GPIO_ACTIVE_HIGH>;   /* P2.05 RF_SW_CTL */
+		};
 	};
 
 	/* Battery voltage monitor: VBAT -> load switch -> 10K/10K divider -> P1.14 (AIN7).
@@ -55,11 +68,20 @@
 		epaper      = &epaper;
 		user-led    = &user_led;
 		user-button = &user_button;
+		watchdog0   = &wdt31;
 	};
 };
 
-/* Battery-voltage ADC on AIN7 (P1.14). Internal 0.6 V ref + gain 1/6 -> 0..3.6 V
- * range covers the ~1.5..2.1 V divider output for a 1S LiPo (3.0..4.2 V). */
+/* Watchdog for the custom OTA rollback: the bootloader arms it before jumping;
+ * the app feeds it and (PAUSE_IN_SLEEP) it stops during System OFF. See src/ota.c. */
+&wdt31 {
+	status = "okay";
+};
+
+/* Battery-voltage ADC on AIN7 (P1.14). The nRF54L15 SAADC internal reference is
+ * 0.9 V and (unlike the nRF52) has no 1/6 gain, so use gain 1/4 -> 0..3.6 V full
+ * scale, covering the ~1.5..2.1 V divider output for a 1S LiPo (3.0..4.2 V).
+ * (ADC_GAIN_1_6 + 600 mV here silently failed adc_channel_setup -> "--V".) */
 &adc {
 	#address-cells = <1>;
 	#size-cells = <0>;
@@ -67,9 +89,9 @@
 
 	channel@0 {
 		reg = <0>;
-		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,gain = "ADC_GAIN_1_4";
 		zephyr,reference = "ADC_REF_INTERNAL";
-		zephyr,vref-mv = <600>;
+		zephyr,vref-mv = <900>;
 		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
 		zephyr,input-positive = <NRF_SAADC_AIN7>;   /* P1.14 divider midpoint */
 		zephyr,resolution = <12>;
@@ -213,24 +235,53 @@
 		#address-cells = <1>;
 		#size-cells = <1>;
 
-		boot_partition: partition@0 {
-			label = "mcuboot";
-			reg = <0x0 DT_SIZE_K(64)>;
+		/* Custom direct-XIP A/B layout (no MCUboot). The first-stage bootloader
+		 * lives at 0x0 and CRC-verifies + chain-loads slot_a or slot_b; the app
+		 * is built twice, linked per slot. See firmware/bootloader/ + src/ota.c. */
+		bootloader_partition: partition@0 {
+			label = "bootloader";
+			reg = <0x0 DT_SIZE_K(48)>;
 		};
 
-		slot0_partition: partition@10000 {
-			label = "image-0";
-			reg = <0x10000 DT_SIZE_K(664)>;
+		/* Bootloader metadata (per-slot valid/confirmed/version/attempts), written
+		 * as a 32-byte append log; 2x 4K sectors for wear. See common/bl_state.c. */
+		bl_state_partition: partition@c000 {
+			label = "bl_state";
+			reg = <0xc000 DT_SIZE_K(8)>;
 		};
 
-		slot1_partition: partition@b6000 {
-			label = "image-1";
-			reg = <0xb6000 DT_SIZE_K(664)>;
+		slot_a_partition: partition@e000 {
+			label = "image-a";
+			reg = <0xe000 DT_SIZE_K(512)>;
 		};
 
-		storage_partition: partition@15c000 {
+		slot_b_partition: partition@8e000 {
+			label = "image-b";
+			reg = <0x8e000 DT_SIZE_K(512)>;
+		};
+
+		/* Five 16K image slots (raw flash via flash_area; see src/badge_store.c):
+		 * four user image frames (slots 0..3) plus the identity image (slot 4).
+		 * Each slot holds a 2-bit grayscale (11616 B) or 1-bit B/W (5808 B) image
+		 * plus a 16-byte header. */
+		images_partition: partition@10e000 {
+			label = "images";
+			reg = <0x10e000 DT_SIZE_K(80)>;
+		};
+
+		storage_partition: partition@122000 {
 			label = "storage";
-			reg = <0x15c000 DT_SIZE_K(36)>;
+			reg = <0x122000 DT_SIZE_K(264)>;
+		};
+
+		/* Per-unit factory record (assigned + written once at manufacturing by
+		 * firmware/flashtool/; read-only at runtime via src/factory_id.c). Holds
+		 * the badge's unique 15-bit id so the mesh unicast address / config code /
+		 * GAP name don't collide across a large fleet. Kept at the flash tail so
+		 * `storage` keeps its offset. */
+		factory_partition: partition@164000 {
+			label = "factory";
+			reg = <0x164000 DT_SIZE_K(4)>;
 		};
 	};
 };

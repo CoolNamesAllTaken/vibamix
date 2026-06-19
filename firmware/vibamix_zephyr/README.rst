@@ -1,3 +1,9 @@
+.. note::
+
+   This file is stale upstream boilerplate from the original Nordic ``peripheral_lbs`` sample and
+   does **not** describe the vibamix badge. For how to build and flash the bootloader + application,
+   see ``../README.md``. Architecture notes are in ``AGENTS.md``.
+
 .. _peripheral_lbs:
 
 Bluetooth: Peripheral LBS

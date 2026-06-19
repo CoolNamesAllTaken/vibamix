@@ -5,20 +5,40 @@
 #include <stdint.h>
 #include "Display_EPD_W21.h"
 
+// Render stored grayscale image slots (and the identity image) in real 4-level gray
+// (SSD1680 custom waveform) instead of dithering to 1bpp. Set to 0 for the dithered
+// B/W path. Declared here so non-GUI code can pick the gray identity render path.
+#ifndef VIBAMIX_EPD_4GRAY
+#define VIBAMIX_EPD_4GRAY 1
+#endif
+
 class GUI {
 public:
     void init();
     void show_hello_world();
 
+    // Push a fully blank (white) frame — used when a selected frame has no stored
+    // content, so the bistable panel doesn't keep showing the previous image.
+    void show_blank();
+
     // Re-initialize the panel after a deep sleep, before redrawing.
     void wake();
 
     // Draw the badge identity screen: name (large) + fun fact (wrapped).
-    void show_text(const char *name, const char *fun_fact);
+    void show_text(const char *name, const char *body);
 
     // Blit a full 1bpp framebuffer to the panel. `buf` is normally framebuffer()
     // itself (image_xfer reassembles straight into it), so no copy is needed.
     void render_image(const uint8_t *buf, size_t len);
+
+    // Dither a 2-bit grayscale image (landscape-packed, w<=264 h<=176) into the
+    // framebuffer and display it.
+    void render_gray2(const uint8_t *src, uint16_t w, uint16_t h);
+
+    // Render a 2-bit grayscale image FULL-SCREEN (4-gray) as the identity base. The
+    // banner is baked into the source before this (see identity_bake_overlays) — a
+    // 1-bit overlay can't run over a 4-gray base.
+    void render_identity_gray(const uint8_t *src, uint16_t w, uint16_t h);
 
     void sleep();
 
@@ -36,6 +56,8 @@ public:
     size_t   framebuffer_size() const { return sizeof(m_image); }
 
 private:
+    void render_gray_full(const uint8_t *src, uint16_t w, uint16_t h);
+
     uint8_t m_image[EPD_WIDTH * EPD_HEIGHT / 8];
 };
 

@@ -5,14 +5,18 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "West Build (vibamix)",
+            // DEFAULT build (Ctrl/Cmd+Shift+B): build BOTH direct-XIP slots into
+            // build/slotA + build/slotB, trailer each, and pack build/vibamix.ota
+            // (the OTA bundle only exists once both slots are built with a shared
+            // version — that's what build_slots.sh orchestrates). VBX_PRISTINE=0
+            // keeps these incremental so the shortcut stays fast; the manual
+            // `bash scripts/build_slots.sh` stays pristine. Debug loads slot A from
+            // build/slotA/zephyr/zephyr.elf (see launch.json).
+            "label": "West Build both slots + OTA (vibamix)",
             "type": "shell",
-            "command": "west",
+            "command": "bash",
             "args": [
-                "build",
-                "-b", "vibamix_xiao/nrf54l15/cpuapp",
-                "--",
-                "-DBOARD_ROOT=${workspaceFolder}/firmware/vibamix_zephyr"
+                "scripts/build_slots.sh"
             ],
             "options": {
                 "cwd": "${workspaceFolder}/firmware/vibamix_zephyr",
@@ -21,7 +25,8 @@
                     "ZEPHYR_TOOLCHAIN_VARIANT": "zephyr",
                     "ZEPHYR_SDK_INSTALL_DIR": "/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk",
                     "ZEPHYR_BASE": "/opt/nordic/ncs/v3.3.0/zephyr",
-                    "NRFUTIL_HOME": "/opt/nordic/ncs/toolchains/0c0f19d91c/nrfutil/home"
+                    "NRFUTIL_HOME": "/opt/nordic/ncs/toolchains/0c0f19d91c/nrfutil/home",
+                    "VBX_PRISTINE": "0"
                 }
             },
             "group": {
@@ -31,13 +36,16 @@
             "problemMatcher": ["$gcc"]
         },
         {
-            "label": "West Build (pristine)",
+            // Single-slot incremental build into build/ (fast; no OTA bundle). Run
+            // via "Tasks: Run Task" when you only need slot A and don't need .ota.
+            "label": "West Build (vibamix, slot A only)",
             "type": "shell",
             "command": "west",
             "args": [
                 "build",
-                "-p", "always",
                 "-b", "vibamix_xiao/nrf54l15/cpuapp",
+                "--no-sysbuild",
+                "-d", "build/slotA",
                 "--",
                 "-DBOARD_ROOT=${workspaceFolder}/firmware/vibamix_zephyr"
             ],
@@ -55,15 +63,83 @@
             "problemMatcher": ["$gcc"]
         },
         {
+            "label": "West Build (pristine)",
+            "type": "shell",
+            "command": "west",
+            "args": [
+                "build",
+                "-p", "always",
+                "-b", "vibamix_xiao/nrf54l15/cpuapp",
+                "--no-sysbuild",
+                "--",
+                "-DBOARD_ROOT=${workspaceFolder}/firmware/vibamix_zephyr"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/firmware/vibamix_zephyr",
+                "env": {
+                    "PATH": "/opt/nordic/ncs/toolchains/0c0f19d91c/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/usr/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/usr/local/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/nanopb/generator-bin:/opt/nordic/ncs/toolchains/0c0f19d91c/nrfutil/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk/arm-zephyr-eabi/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk/riscv64-zephyr-elf/bin:${env:PATH}",
+                    "ZEPHYR_TOOLCHAIN_VARIANT": "zephyr",
+                    "ZEPHYR_SDK_INSTALL_DIR": "/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk",
+                    "ZEPHYR_BASE": "/opt/nordic/ncs/v3.3.0/zephyr",
+                    "NRFUTIL_HOME": "/opt/nordic/ncs/toolchains/0c0f19d91c/nrfutil/home"
+                }
+            },
+            "group": "build",
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            // One-time setup: program the custom first-stage bootloader at 0x0 with a
+            // full chip erase (clears any old MCUboot + stale partitions; the flash map
+            // changed). The BL persists across app reflashes — debugging only loads the
+            // app into slot A — so you normally run this once per board. Build the BL
+            // first: west build -b vibamix_xiao/nrf54l15/cpuapp --no-sysbuild -d build/bl
+            //   ../bootloader -- -DBOARD_ROOT=$(pwd)
+            "label": "Flash bootloader (one-time)",
+            "type": "shell",
+            "command": "west",
+            "args": [
+                "flash",
+                "--erase",
+                "-d", "build/bl"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/firmware/vibamix_zephyr",
+                "env": {
+                    "PATH": "/opt/nordic/ncs/toolchains/0c0f19d91c/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/usr/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/usr/local/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/nanopb/generator-bin:/opt/nordic/ncs/toolchains/0c0f19d91c/nrfutil/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk/arm-zephyr-eabi/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk/riscv64-zephyr-elf/bin:${env:PATH}",
+                    "ZEPHYR_TOOLCHAIN_VARIANT": "zephyr",
+                    "ZEPHYR_SDK_INSTALL_DIR": "/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk",
+                    "ZEPHYR_BASE": "/opt/nordic/ncs/v3.3.0/zephyr",
+                    "NRFUTIL_HOME": "/opt/nordic/ncs/toolchains/0c0f19d91c/nrfutil/home"
+                }
+            },
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            // The custom first-stage bootloader lives at 0x0 (flashed once over SWD);
+            // the app is linked into slot A. The debugger just `load`s the unsigned app
+            // ELF to slot A (see launch.json) — no MCUboot, no signing, no west flash.
+            // This task only starts the probe-rs GDB server. The wrapper is idempotent:
+            // if a server is already listening (debug restart) it prints the sentinel
+            // and exits so cortex-debug attaches to the existing one.
             "label": "probe-rs GDB server",
             "type": "shell",
             "command": "${workspaceFolder}/firmware/vibamix_zephyr/boards/pants_for_birds/vibamix_xiao/support/probe-rs-wrapper",
             "args": [
                 "gdb",
                 "--chip",
-                "nRF54L15",
-                // "--probe", "6F643EB8"
+                "nRF54L15"
             ],
+            "options": {
+                "cwd": "${workspaceFolder}/firmware/vibamix_zephyr",
+                "env": {
+                    "PATH": "/opt/nordic/ncs/toolchains/0c0f19d91c/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/usr/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/usr/local/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/nanopb/generator-bin:/opt/nordic/ncs/toolchains/0c0f19d91c/nrfutil/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk/arm-zephyr-eabi/bin:/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk/riscv64-zephyr-elf/bin:${env:PATH}",
+                    "ZEPHYR_TOOLCHAIN_VARIANT": "zephyr",
+                    "ZEPHYR_SDK_INSTALL_DIR": "/opt/nordic/ncs/toolchains/0c0f19d91c/opt/zephyr-sdk",
+                    "ZEPHYR_BASE": "/opt/nordic/ncs/v3.3.0/zephyr",
+                    "NRFUTIL_HOME": "/opt/nordic/ncs/toolchains/0c0f19d91c/nrfutil/home"
+                }
+            },
             "isBackground": true,
             "problemMatcher": {
                 "owner": "probe-rs",

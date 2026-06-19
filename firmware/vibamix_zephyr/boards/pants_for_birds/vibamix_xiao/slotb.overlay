@@ -1,0 +1,11 @@
+/*
+ * Direct-XIP slot-B build overlay. The default board DTS links the app into
+ * slot A; pass this via -DEXTRA_DTC_OVERLAY_FILE to link the same source into
+ * slot B instead (CONFIG_FLASH_LOAD_OFFSET follows the chosen code-partition).
+ * See scripts/build_slots.sh and src/slots.h.
+ */
+/ {
+	chosen {
+		zephyr,code-partition = &slot_b_partition;
+	};
+};

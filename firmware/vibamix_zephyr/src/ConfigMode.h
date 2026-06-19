@@ -28,7 +28,21 @@ public:
     void on_name(const char *s, size_t len);
     // Image-upload completion: render it (it takes over the screen) and stop the
     // countdown from repainting over it.
-    void on_content_image(const uint8_t *buf, size_t len, uint16_t w, uint16_t h);
+    void on_content_image(uint8_t slot, uint8_t fmt, const uint8_t *buf, size_t len,
+                          uint16_t w, uint16_t h);
+    // GATT screen/display handler bridges.
+    void on_screen(uint8_t idx, const char *hdr, size_t hlen,
+                   const char *body, size_t blen);
+    void on_display(uint8_t kind, uint8_t idx);
+    // OTA: show a status screen while the firmware image streams in / applies.
+    void on_ota_start(uint32_t total);
+    void on_ota_end(bool ok);
+    // Config-command bridges for the attendee/table ID and per-frame LED.
+    void on_attendee(const char *s, size_t len);
+    void on_frame_led(uint8_t kind, uint8_t idx, uint8_t anim,
+                      uint8_t r, uint8_t g, uint8_t b);
+    // Gateway bridge: re-originate a vendor-model access payload onto the mesh.
+    void on_mesh_tx(const uint8_t *access, size_t len);
 
 private:
     GUI      *m_gui{nullptr};
@@ -41,6 +55,10 @@ extern "C" {
 
 // Hook for the user-button ISR to request exiting config mode.
 void config_mode_on_button(void);
+// Mesh-RX hooks (run on the BT thread): keep an awake badge awake. `on_content`
+// also marks the screen as taken over so the countdown stops repainting.
+void config_mode_on_heartbeat(void);
+void config_mode_on_content(void);
 
 #ifdef __cplusplus
 }
