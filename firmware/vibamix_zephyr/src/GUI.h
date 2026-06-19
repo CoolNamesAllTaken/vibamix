@@ -8,10 +8,11 @@
 class GUI {
 public:
     void init();
-    void show_hello_world();
 
     // Re-initialize the panel after a deep sleep, before redrawing.
     void wake();
+
+    void show_hello_world();
 
     // Draw the badge identity screen: name (large) + fun fact (wrapped).
     void show_text(const char *name, const char *fun_fact);
@@ -19,6 +20,8 @@ public:
     // Blit a full 1bpp framebuffer to the panel. `buf` is normally framebuffer()
     // itself (image_xfer reassembles straight into it), so no copy is needed.
     void render_image(const uint8_t *buf, size_t len);
+
+    void show_als_readings(uint32_t lux, uint32_t gain, uint16_t ch0_raw, uint16_t ch1_raw, bool valid, const char *diag);
 
     void sleep();
 
