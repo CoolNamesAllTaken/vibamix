@@ -22,6 +22,7 @@ static struct als_reading s_reading = {0, 0, 0, 0, false, "Pending"};
 static LEDStrip *s_leds;                        // owns the shared power rail
 static atomic_t s_config_mode = ATOMIC_INIT(0); // 1 -> pulse instead of poll
 static atomic_t s_in_pulse = ATOMIC_INIT(0);    // 1 while a pulse holds the rail
+static atomic_t s_in_poll = ATOMIC_INIT(0);     // 1 while a continuous read holds the I2C bus
 
 // How often to pulse a reading in config mode (each pulse powers the rail ~0.5 s).
 #define PULSE_PERIOD_MS 5000
@@ -116,7 +117,16 @@ static void poll_while_powered(void) {
   while (rail_powered() && !atomic_get(&s_config_mode)) {
     struct ltr329als_config cfg = s_base_cfg;
     cfg.gain = ltr329als_current_gain();
+    // Claim the bus, then re-check: if config mode just switched (which cuts the shared
+    // rail), bail before touching I2C so we can't be powered down mid-transfer (TWIM
+    // hang). set_config_mode(true) waits on s_in_poll, closing the race the other way.
+    atomic_set(&s_in_poll, 1);
+    if (!rail_powered() || atomic_get(&s_config_mode)) {
+      atomic_set(&s_in_poll, 0);
+      return;
+    }
     ret = ltr329als_init(&cfg);
+    atomic_set(&s_in_poll, 0);
     if (ret == 0) {
       break;
     }
@@ -139,7 +149,15 @@ static void poll_while_powered(void) {
       return;
     }
     struct ltr329als_sample sample;
+    // Same claim-then-recheck handshake as the init above, so a config-mode rail cut
+    // can't land in the middle of this read.
+    atomic_set(&s_in_poll, 1);
+    if (!rail_powered() || atomic_get(&s_config_mode)) {
+      atomic_set(&s_in_poll, 0);
+      return;
+    }
     ret = ltr329als_read_lux(&sample);
+    atomic_set(&s_in_poll, 0);
     if (ret == -EAGAIN || ret == -ENODATA) {
       continue;
     }
@@ -197,9 +215,16 @@ void ambient_light_sensor_start(LEDStrip *leds) {
 
 void ambient_light_sensor_set_config_mode(bool on) {
   atomic_set(&s_config_mode, on ? 1 : 0);
-  if (!on) {
-    // Wait for any in-flight pulse to release the rail before the caller (main)
-    // re-takes the LED gate, so the two can't fight over the power pin.
+  if (on) {
+    // Entering config mode: the caller is about to cut the shared rail. Wait for any
+    // in-flight continuous read to finish so the LTR-329 isn't powered down mid-I2C
+    // (which hangs the TWIM bus and, on the just-booted reset-wake path, the badge).
+    while (atomic_get(&s_in_poll)) {
+      k_msleep(5);
+    }
+  } else {
+    // Leaving config mode: wait for any in-flight pulse to release the rail before the
+    // caller (main) re-takes the LED gate, so the two can't fight over the power pin.
     while (atomic_get(&s_in_pulse)) {
       k_msleep(5);
     }

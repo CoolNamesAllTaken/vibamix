@@ -5,6 +5,8 @@
  */
 
 #include <cmsis_core.h>
+#include <hal/nrf_gpio.h>
+#include <hal/nrf_uarte.h>
 #include <hal/nrf_wdt.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/kernel.h>
@@ -236,7 +238,20 @@ static void enter_deep_sleep(void)
 		gpio_pin_interrupt_configure_dt(&user_btn, GPIO_INT_LEVEL_ACTIVE);
 	}
 
-	// 5. Deep sleep. The ePaper keeps its image with no power. System OFF powers the
+	// 5. Park the console UART (P1.09 TX / P1.08 RX). Its TX idles high into the XIAO's
+	//    SAMD11, which is unpowered when USB is out — back-feeding the dead domain
+	//    (charger chatter, ~5 mA). Disable the UARTE so it releases the pads, then float
+	//    both: a disconnected pad stays high-Z through System OFF (its reset state), so
+	//    nothing drives the SAMD11. Last step before power-off (no console after this);
+	//    the wake reboot re-inits the UART and reconnects the pads. gpio1 only — never
+	//    the gpio0 wake button. (Deliberately NOT via CONFIG_PM_DEVICE: that leaves the
+	//    console suspended at boot, so the first printk hangs on battery — the device
+	//    only booted with USB attached.)
+	nrf_uarte_disable((NRF_UARTE_Type *)DT_REG_ADDR(DT_NODELABEL(uart22)));
+	nrf_gpio_cfg_default(NRF_GPIO_PIN_MAP(1, 9));   // P1.09 SAMD11_RX (nRF54 TX out)
+	nrf_gpio_cfg_default(NRF_GPIO_PIN_MAP(1, 8));   // P1.08 SAMD11_TX (nRF54 RX in)
+
+	// 6. Deep sleep. The ePaper keeps its image with no power. System OFF powers the
 	//    radio + peripherals down in hardware (no bt_disable() needed). Wake by a
 	//    button press (RESET_LOW_POWER_WAKE) or a reset — a full reboot that re-runs
 	//    main()/MeshNode::init() to bring BT/mesh back up.
@@ -368,8 +383,61 @@ static bool run_awake_window(void)
 	return s_btn_event;
 }
 
+// TEMP boot-trace: blink the user LED (P2.00, a bare GPIO independent of the UART /
+// SAMD11 / radio / SPI / I2C) N times so a battery boot (no console) shows how far it
+// got. Highest count seen = last stage reached; the hang is the step right after.
+// Remove once the battery-boot stall is localized.
+#define DBG_BOOT_TRACE 1
+#if DBG_BOOT_TRACE
+// Raw CPU busy-loop delay — does NOT use the kernel timer (k_msleep), so the blink
+// still works even if the system clock / GRTC never came up. ~150 ms at 128 MHz.
+static void dbg_rawdelay(void)
+{
+	for (volatile uint32_t i = 0; i < 4000000U; i++) {
+		__asm__ volatile("nop");
+	}
+}
+static void dbg_blink(int n)
+{
+	if (!gpio_is_ready_dt(&user_led)) {
+		return;
+	}
+	gpio_pin_configure_dt(&user_led, GPIO_OUTPUT_INACTIVE);
+	for (int i = 0; i < n; i++) {
+		gpio_pin_set_dt(&user_led, 1);   // active-low -> LED on
+		dbg_rawdelay();
+		gpio_pin_set_dt(&user_led, 0);
+		dbg_rawdelay();
+	}
+	dbg_rawdelay();
+	dbg_rawdelay();
+	dbg_rawdelay();   // ~450 ms gap before the next milestone
+}
+
+// Earliest-possible marker: runs at PRE_KERNEL_1 (before the console banner, clock,
+// and most driver init) using only raw GPIO — no kernel/clock/console needed. TWO
+// long pulses = "the bootloader handed off and the app's C runtime is alive." If you
+// see these but no counted milestone blinks, the hang is in app init between here and
+// main() (console/clock/banner). If you see NOTHING, the bootloader itself is hanging.
+static int dbg_early_blink(void)
+{
+	nrf_gpio_cfg_output(NRF_GPIO_PIN_MAP(2, 0));   // P2.00 user LED (active-low)
+	for (int i = 0; i < 2; i++) {
+		nrf_gpio_pin_write(NRF_GPIO_PIN_MAP(2, 0), 0);   // LED on
+		dbg_rawdelay(); dbg_rawdelay(); dbg_rawdelay();
+		nrf_gpio_pin_write(NRF_GPIO_PIN_MAP(2, 0), 1);   // LED off
+		dbg_rawdelay(); dbg_rawdelay(); dbg_rawdelay();
+	}
+	return 0;
+}
+SYS_INIT(dbg_early_blink, PRE_KERNEL_1, 0);
+#else
+#define dbg_blink(n) ((void)0)
+#endif
+
 int main(void)
 {
+	dbg_blink(1);   // M1: app main() reached
 	printk("Starting vibamix\n");
 
 	// Select the external antenna before any radio activity: power the RF switch
@@ -389,6 +457,7 @@ int main(void)
 	// Bring the LED strip up first so the boot animation is independent of the
 	// ePaper/mesh. A strip failure is non-fatal — we still deep-sleep below.
 	const bool leds_ok = (s_leds.init() == 0);
+	dbg_blink(2);   // M2: LED strip init done
 
 	// Start the ambient-light-sensor monitor AFTER the LED strip powers its rail:
 	// the LTR-329 shares that gate, so the monitor must not poll I2C before it's up
@@ -397,6 +466,7 @@ int main(void)
 	ambient_light_sensor_start(&s_leds);
 
 	s_gui.init();
+	dbg_blink(3);   // M3: ePaper (GUI) init done
 
 	if (gpio_is_ready_dt(&user_led))
 	{
@@ -419,6 +489,7 @@ int main(void)
 	// Bring up the mesh node (BT + mesh stack, self-provision, GATT proxy, and
 	// the per-device name used for Web Bluetooth discovery). Non-fatal.
 	s_mesh.init(&s_gui, &s_leds);
+	dbg_blink(4);   // M4: BT/mesh init done
 
 	// Reaching here means BLE/mesh came up, so a freshly-OTA'd image is healthy:
 	// confirm THIS slot in bl_state so the bootloader keeps it (idempotent no-op
@@ -429,6 +500,7 @@ int main(void)
 	// Now that we've confirmed, keep the watchdog fed (it was running unfed up to
 	// this point to catch a hung bring-up). No-op if the bootloader didn't arm it.
 	wdt_keepalive_start();
+	dbg_blink(5);   // M5: slot confirmed + watchdog fed
 
 	if (!config_mode)
 	{
@@ -437,6 +509,7 @@ int main(void)
 		// then runs the awake window on top of it.
 		s_mesh.apply_persisted_config();   // renders + set_base_map() + panel sleep
 	}
+	dbg_blink(6);   // M6: first render (apply_persisted_config) done
 
 	// Config <-> identity-countdown loop. Pressing the button in config mode drops
 	// back to the identity frame and counts down to sleep (staying awake while an
@@ -449,13 +522,15 @@ int main(void)
 			// Woken by button (or promoted from the countdown): show the ID + QR and
 			// stay awake so a phone can connect over GATT and upload a badge.
 			printk("Entering config mode\n");
+			// Switch the ALS to pulse mode and wait for any in-flight continuous read to
+			// finish BEFORE cutting the shared rail, so the LTR-329 is never powered down
+			// mid-I2C (which hangs the TWIM bus — and, on a fresh reset-wake into config,
+			// the whole badge). Order matters: quiesce, then drop the rail.
+			ambient_light_sensor_set_config_mode(true);
 			if (leds_ok)
 			{
 				s_leds.off();   // keep it dark during config; battery-friendly
 			}
-			// LEDs (and the shared light-sensor rail) are dark now — have the ALS
-			// briefly pulse the rail for config-screen lux instead of polling a dead bus.
-			ambient_light_sensor_set_config_mode(true);
 			s_config.run(&s_gui, &s_mesh, &user_btn);
 			// Stop pulsing and wait for the rail to be released before we re-take it.
 			ambient_light_sensor_set_config_mode(false);

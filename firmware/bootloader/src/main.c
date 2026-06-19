@@ -19,9 +19,11 @@
  */
 
 #include <cmsis_core.h>
+#include <hal/nrf_gpio.h>
 #include <string.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/watchdog.h>
+#include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/printk.h>
@@ -30,6 +32,32 @@
 #include "bl_state.h"
 #include "diag.h"
 #include "vbx_img.h"
+
+/* TEMP boot-trace: blink the user LED (P2.00, active-low) N times with a raw busy
+ * loop — no console / clock / kernel needed. Localizes a battery-only (no-debugger)
+ * boot hang in the bootloader. Remove once found. */
+#define BL_BOOT_TRACE 1
+#if BL_BOOT_TRACE
+static void bl_blink(int n)
+{
+	nrf_gpio_cfg_output(NRF_GPIO_PIN_MAP(2, 0));
+	for (int i = 0; i < n; i++) {
+		nrf_gpio_pin_write(NRF_GPIO_PIN_MAP(2, 0), 0);   /* LED on */
+		for (volatile uint32_t d = 0; d < 4000000U; d++) { __asm__ volatile("nop"); }
+		nrf_gpio_pin_write(NRF_GPIO_PIN_MAP(2, 0), 1);   /* LED off */
+		for (volatile uint32_t d = 0; d < 4000000U; d++) { __asm__ volatile("nop"); }
+	}
+	for (volatile uint32_t d = 0; d < 12000000U; d++) { __asm__ volatile("nop"); }
+}
+static int bl_early_blink(void)
+{
+	bl_blink(1);   /* B1: bootloader C runtime alive (PRE_KERNEL_1) */
+	return 0;
+}
+SYS_INIT(bl_early_blink, PRE_KERNEL_1, 0);
+#else
+#define bl_blink(n) ((void)0)
+#endif
 
 #define SLOT_A_OFF  DT_REG_ADDR(DT_NODELABEL(slot_a_partition))
 #define SLOT_A_SIZE DT_REG_SIZE(DT_NODELABEL(slot_a_partition))
@@ -190,6 +218,7 @@ static void arm_watchdog(void)
 
 int main(void)
 {
+	bl_blink(2);   /* B2: bootloader main() reached (console init survived) */
 	printk("\nvbx bootloader\n");
 
 	if (debugger_attached()) {
@@ -326,5 +355,6 @@ int main(void)
 		arm_watchdog();
 	}
 
+	bl_blink(3);   /* B3: decision made, about to chain-load the app slot */
 	boot_slot(choice);
 }
