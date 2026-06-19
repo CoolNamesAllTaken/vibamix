@@ -65,6 +65,28 @@ def _reset_cmd(selector: str) -> list[str]:
             "--probe", selector]
 
 
+def _erase_cmd(selector: str) -> list[str]:
+    return [flashconfig.PROBE_RS_BIN, "erase", "--chip", flashconfig.CHIP,
+            "--probe", selector]
+
+
+def _erase_chip(selector: str) -> tuple[bool, str]:
+    """Wipe all nonvolatile memory (incremental download only clears written
+    sectors, so this is the only way to drop stale mesh provisioning / settings /
+    stored images — a factory-clean flash, like the old `west flash --erase`)."""
+    try:
+        proc = subprocess.run(
+            _erase_cmd(selector),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
+    except FileNotFoundError:
+        return False, "probe-rs not found"
+    except subprocess.TimeoutExpired:
+        return False, "erase: timeout"
+    if proc.returncode != 0:
+        return False, f"erase: probe-rs exited {proc.returncode}"
+    return True, "ok"
+
+
 def _write_factory_id(selector: str, factory_id: int) -> tuple[bool, str]:
     """Write the 8-byte factory record (magic, id, ~id) to the factory partition."""
     if not (1 <= factory_id <= flashconfig.FACTORY_ID_MAX):
@@ -101,6 +123,7 @@ def flash_device(
     images: list[Image],
     on_progress: ProgressCb,
     factory_id: int | None = None,
+    erase: bool = False,
 ) -> tuple[bool, str]:
     """Flash an ordered list of images to one probe, then reset once.
 
@@ -108,11 +131,21 @@ def flash_device(
     probe-rs ``download`` only erases the sectors each image covers, so later
     images don't wipe earlier ones. Overall progress is split evenly across them.
 
+    If ``erase`` is set, the whole chip is wiped first (factory-clean) so no stale
+    mesh provisioning / settings / stored images survive; the bootloader is then
+    re-flashed by the image list as usual.
+
     If ``factory_id`` is given, the per-unit factory record is written after the
     images and before the reset, so the board boots with its assigned id.
     """
     if not images:
         return False, "no firmware images to flash"
+
+    if erase:
+        on_progress(0.0, "erasing chip")
+        ok, msg = _erase_chip(selector)
+        if not ok:
+            return False, msg  # never flash onto a half-erased chip
 
     n = len(images)
     on_progress(0.0, "starting")

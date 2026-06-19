@@ -3,6 +3,7 @@
 #include "MeshNode.h"
 #include "app_config.h"
 #include "badge_store.h"
+#include "ambient_light_sensor.h"
 #include "battery.h"
 #include "config_gatt.h"
 #include "gateway_status.h"
@@ -105,14 +106,27 @@ static void start_fast_adv(void)
             printk("config: fast adv create failed\n");
             s_adv_give_up = true;
         } else {
-            const char *name = bt_get_name();
+            // Build the scan-response name locally from the config code instead of
+            // bt_get_name(): it is guaranteed short and null-terminated, so the legacy
+            // scan response always fits. bt_get_name() has been observed returning an
+            // over-long (unterminated) buffer here, which made bt_le_ext_adv_set_data
+            // fail with "adv or scan rsp data too large" and left the badge silent.
+            char code[5];
+            app_identity_code(code);
+            char advname[20];
+            int nlen = snprintf(advname, sizeof(advname), "vibamix-%s", code);
+            if (nlen < 0) {
+                nlen = 0;
+            } else if (nlen > (int)sizeof(advname) - 1) {
+                nlen = sizeof(advname) - 1;   // snprintf truncated — clamp to what fits
+            }
             struct bt_data ad[] = {
                 BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR),
                 BT_DATA_BYTES(BT_DATA_UUID128_ALL,
                     BT_UUID_128_ENCODE(0xf0de0001, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)),
             };
             struct bt_data sd[] = {
-                BT_DATA(BT_DATA_NAME_COMPLETE, name, strlen(name)),
+                BT_DATA(BT_DATA_NAME_COMPLETE, advname, nlen),
             };
             if (bt_le_ext_adv_set_data(s_adv, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd)) != 0) {
                 printk("config: fast adv set_data failed\n");
@@ -406,7 +420,11 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
     // Initial full draw + establish the partial-refresh baseline. The panel stays
     // awake (no deep sleep) so the per-second countdown can use partial refresh.
     gui->wake();
-    qr_screen_draw(*gui, code, url, batt_mv, batt_pct, total_sec, total_sec);
+    {
+        struct als_reading als = ambient_light_sensor_get();
+        const int lux = als.valid ? (int)als.lux : -1;
+        qr_screen_draw(*gui, code, url, batt_mv, batt_pct, total_sec, total_sec, lux);
+    }
     gui->set_base_map();
 
     // Bring up the fast connectable advertiser so a laptop finds us quickly.
@@ -508,9 +526,13 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
             gateway_status_set_active(true);       // relayed mesh commands now overlay
             gw_shown = false;                      // count==0 at connect -> Connected screen
             gui->wake();
-            config_screen_connected(*gui, cfg->name,
-                                    cfg->has_attendee ? cfg->attendee_id : "",
-                                    batt_mv, batt_pct, true, false);
+            {
+                struct als_reading als = ambient_light_sensor_get();
+                const int lux = als.valid ? (int)als.lux : -1;
+                config_screen_connected(*gui, cfg->name,
+                                        cfg->has_attendee ? cfg->attendee_id : "",
+                                        batt_mv, batt_pct, true, false, lux);
+            }
             gui->set_base_map();
             last_shown = -1;
         } else if (!connected && phase == PHASE_CONNECTED) {
@@ -523,6 +545,12 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
         }
 
         if (s_exit) {
+            break;
+        }
+        // A 5 s button hold forces sleep regardless of connection state; bail so
+        // main() routes straight to deep sleep. (The hold's initial press may have
+        // had its s_exit cleared by the entry wait-for-release, so check directly.)
+        if (app_force_sleep_requested()) {
             break;
         }
         if (!connected && (k_uptime_get() - s_last_activity) >= kConfigWindowMs) {
@@ -545,12 +573,14 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
                     // Once this badge has relayed >=1 command to the fleet it's a mesh
                     // gateway -> dedicated screen; otherwise the plain Connected screen.
                     const bool gw = gateway_status_count() > 0;
+                    struct als_reading als = ambient_light_sensor_get();
+                    const int lux = als.valid ? (int)als.lux : -1;
                     if (gw) {
-                        config_screen_gateway(*gui, batt_mv, batt_pct, app_alive, ka_blink);
+                        config_screen_gateway(*gui, batt_mv, batt_pct, app_alive, ka_blink, lux);
                     } else {
                         config_screen_connected(*gui, cfg->name,
                                                 cfg->has_attendee ? cfg->attendee_id : "",
-                                                batt_mv, batt_pct, app_alive, ka_blink);
+                                                batt_mv, batt_pct, app_alive, ka_blink, lux);
                     }
                     if (gw != gw_shown) {
                         // Layout changed (Connected <-> Gateway): full refresh so the
@@ -598,7 +628,9 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
                 last_shown = remaining;
                 // Only the QR phase repaints here — a disconnect exits the loop, so
                 // phase is always PHASE_QR while disconnected.
-                qr_screen_draw(*gui, code, url, batt_mv, batt_pct, remaining, total_sec);
+                struct als_reading als = ambient_light_sensor_get();
+                const int lux = als.valid ? (int)als.lux : -1;
+                qr_screen_draw(*gui, code, url, batt_mv, batt_pct, remaining, total_sec, lux);
                 if (++tick % kFullRefreshEvery == 0) {
                     gui->set_base_map();   // periodic full refresh to clear ghosting
                 } else {

@@ -1021,6 +1021,9 @@ class MainWindow(QMainWindow):
             lambda: self._browse_into(self.fl_app_path, "App slotA.bin", "BIN (*.bin)"))
         self.fl_factory = QCheckBox("Write per-unit factory id (mesh unicast / config code)")
         self.fl_factory.setChecked(True)
+        self.fl_erase = QCheckBox(
+            "Full chip erase first (factory-clean — wipes mesh provisioning / stored content)")
+        self.fl_erase.setChecked(False)
         gl.addWidget(QLabel("Bootloader (.hex → 0x0)"), 0, 0)
         gl.addWidget(self.fl_bl_path, 0, 1)
         gl.addWidget(bl_browse, 0, 2)
@@ -1028,6 +1031,7 @@ class MainWindow(QMainWindow):
         gl.addWidget(self.fl_app_path, 1, 1)
         gl.addWidget(app_browse, 1, 2)
         gl.addWidget(self.fl_factory, 2, 0, 1, 3)
+        gl.addWidget(self.fl_erase, 3, 0, 1, 3)
         v.addWidget(g)
 
         self.fl_table = QTableWidget(0, 3)
@@ -1117,6 +1121,7 @@ class MainWindow(QMainWindow):
             flash.Image(app, "bin", "app", flashconfig.APP_SLOT_A_ADDR),
         ]
         want_factory = self.fl_factory.isChecked()
+        want_erase = self.fl_erase.isChecked()
 
         self._flash_running = True
         self._fl_timer.stop()
@@ -1125,13 +1130,15 @@ class MainWindow(QMainWindow):
         for p in targets:
             self._set_probe_status(p.label, "queued")
         self._log(f"Flashing {len(targets)} probe(s) … "
-                  f"factory id {'ON' if want_factory else 'off'}.")
+                  f"factory id {'ON' if want_factory else 'off'}, "
+                  f"erase {'ON' if want_erase else 'off'}.")
 
         t = threading.Thread(
-            target=self._flash_worker, args=(targets, images, want_factory), daemon=True)
+            target=self._flash_worker, args=(targets, images, want_factory, want_erase),
+            daemon=True)
         t.start()
 
-    def _flash_worker(self, targets, images, want_factory: bool) -> None:
+    def _flash_worker(self, targets, images, want_factory: bool, want_erase: bool) -> None:
         """Runs off the Qt thread: one probe-rs flash per probe, bounded pool."""
         def one(p: probes.Probe) -> bool:
             try:
@@ -1142,7 +1149,7 @@ class MainWindow(QMainWindow):
             ok, msg = flash.flash_device(
                 p.selector, images,
                 lambda pct, phase: self.flash_progress.emit(p.label, pct, phase),
-                fid)
+                fid, erase=want_erase)
             detail = msg if not ok else (f"id 0x{fid:04x}" if fid is not None else "ok")
             self.flash_result.emit(p.label, ok, detail)
             return ok

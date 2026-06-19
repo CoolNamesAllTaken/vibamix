@@ -23,6 +23,14 @@ public:
     // Apply whatever config was restored from settings to the display + LEDs.
     void apply_persisted_config();
 
+    // Stop the radio for deep sleep: park the mesh network (stops scan/relay/beacon
+    // TX) then disable the BT controller so MPSL releases the radio + clocks and the
+    // SoC can actually reach System OFF. The real System OFF path reboots on wake
+    // (re-init via init()); only the debugger fake-sleep path needs radio_resume().
+    void radio_suspend();
+    // Undo radio_suspend(): re-enable BT and resume mesh activity.
+    void radio_resume();
+
     // The LED strip this node drives (config mode borrows it to light per-frame
     // LEDs while a content frame is on the panel).
     LEDStrip *leds() const { return m_leds; }

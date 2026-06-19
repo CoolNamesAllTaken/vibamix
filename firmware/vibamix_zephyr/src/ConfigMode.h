@@ -55,6 +55,9 @@ extern "C" {
 
 // Hook for the user-button ISR to request exiting config mode.
 void config_mode_on_button(void);
+// Provided by main.cpp: true once the user has held the button long enough to force
+// deep sleep. ConfigMode polls this to abandon its window so main() can power off.
+bool app_force_sleep_requested(void);
 // Mesh-RX hooks (run on the BT thread): keep an awake badge awake. `on_content`
 // also marks the screen as taken over so the countdown stops repainting.
 void config_mode_on_heartbeat(void);

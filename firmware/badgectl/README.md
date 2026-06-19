@@ -64,6 +64,13 @@ on `PATH`).
    press **Flash all**. Each probe flashes concurrently: bootloader → app (slot A, `0xE000`) →
    factory id → reset. Per-probe progress shows in the table; the board boots the app standalone.
 
+   - **Full chip erase first** (checkbox, off by default): wipes *all* nonvolatile memory before
+     reflashing — leftover mesh provisioning, settings/ZMS, and stored images/screens — for a
+     factory-clean badge (the equivalent of `west flash --erase`). Incremental flashing only rewrites
+     the sectors it touches, so use this when you want to clear stale on-device state. Slower, and it
+     erases the bootloader too (which the same run re-flashes). The factory id is unaffected — it's
+     re-derived from `serials.json` by probe serial.
+
 The app **must** be the trailered `slotA.bin`, not a plain `zephyr.hex`: the direct-XIP bootloader
 CRC-verifies the slot via its 32-byte `VIMG` trailer before booting, so an un-trailered app only runs
 under an attached debugger.

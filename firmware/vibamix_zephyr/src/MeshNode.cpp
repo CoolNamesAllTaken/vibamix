@@ -223,6 +223,35 @@ void MeshNode::apply_persisted_config()
     redraw_identity();
 }
 
+void MeshNode::radio_suspend()
+{
+    // Park the mesh network first (stop scanning / relay / Secure Network Beacon TX),
+    // then disable the controller so MPSL releases the radio + clocks. Without this the
+    // radio keeps cycling and sys_poweroff() can't reach true System OFF.
+    int err = bt_mesh_suspend();
+    if (err && err != -EALREADY) {
+        printk("bt_mesh_suspend failed (%d)\n", err);
+    }
+    err = bt_disable();
+    if (err) {
+        printk("bt_disable failed (%d)\n", err);
+    }
+}
+
+void MeshNode::radio_resume()
+{
+    // Mirror init()'s order: bring the controller back up, then resume mesh activity.
+    int err = bt_enable(nullptr);
+    if (err) {
+        printk("bt_enable (resume) failed (%d)\n", err);
+        return;
+    }
+    err = bt_mesh_resume();
+    if (err && err != -EALREADY) {
+        printk("bt_mesh_resume failed (%d)\n", err);
+    }
+}
+
 void MeshNode::redraw_identity(bool sleeping)
 {
     if (!m_gui) {

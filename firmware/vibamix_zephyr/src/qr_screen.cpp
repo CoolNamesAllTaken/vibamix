@@ -66,9 +66,25 @@ static int draw_battery_icon(int x, int y, int pct)
     return x + bw + 4;
 }
 
-// Top status bar: battery icon + percent (left), countdown M:SS (right), then a
-// progress bar that shrinks from full toward empty as remaining/total falls.
-static void draw_status_bar(int batt_mv, int batt_pct, int remaining_sec, int total_sec)
+// Ambient-light readout: "NNN lx" (or "-- lx" when unknown), centered on the top
+// status row in the same style as the battery text, so it sits between the
+// left-aligned battery and the right-aligned countdown / keepalive dot.
+static void draw_lux_label(int lux)
+{
+    char buf[16];
+    if (lux >= 0) {
+        snprintf(buf, sizeof(buf), "%d lx", lux);
+    } else {
+        snprintf(buf, sizeof(buf), "-- lx");
+    }
+    const int w = Paint_StringWidth_P(buf, &PoppinsMd16);
+    Paint_DrawString_P((kCanvasW - w) / 2, 1, buf, &PoppinsMd16, WHITE, BLACK);
+}
+
+// Top status bar: battery icon + percent (left), lux (center), countdown M:SS
+// (right), then a progress bar that shrinks from full toward empty as remaining/total falls.
+static void draw_status_bar(int batt_mv, int batt_pct, int remaining_sec, int total_sec,
+                            int lux)
 {
     char buf[20];
 
@@ -81,6 +97,9 @@ static void draw_status_bar(int batt_mv, int batt_pct, int remaining_sec, int to
         snprintf(buf, sizeof(buf), "-- %%");
     }
     Paint_DrawString_P(icon_end + 3, 1, buf, &PoppinsMd16, WHITE, BLACK);
+
+    // Lux (center).
+    draw_lux_label(lux);
 
     // Countdown (right-aligned).
     if (remaining_sec < 0) {
@@ -173,14 +192,15 @@ static int draw_wrapped(int x, int y, int maxW, const char *text, pFONT *font)
 }
 
 void qr_screen_draw(GUI &gui, const char *code, const char *url,
-                    int batt_mv, int batt_pct, int remaining_sec, int total_sec)
+                    int batt_mv, int batt_pct, int remaining_sec, int total_sec,
+                    int lux)
 {
     uint8_t *fb = gui.framebuffer();
 
     Paint_NewImage(fb, EPD_WIDTH, EPD_HEIGHT, ROTATE_270, WHITE);
     Paint_Clear(WHITE);
 
-    draw_status_bar(batt_mv, batt_pct, remaining_sec, total_sec);
+    draw_status_bar(batt_mv, batt_pct, remaining_sec, total_sec, lux);
 
     // Body: QR (left, in a fixed-width box so the right column stays put), and
     // the heading / prompt / code (right).
@@ -524,7 +544,8 @@ static void draw_bt_badge(int cx, int cy, int r)
 }
 
 void config_screen_connected(GUI &gui, const char *name, const char *table,
-                             int batt_mv, int batt_pct, bool app_alive, bool blink)
+                             int batt_mv, int batt_pct, bool app_alive, bool blink,
+                             int lux)
 {
     uint8_t *fb = gui.framebuffer();
 
@@ -541,6 +562,9 @@ void config_screen_connected(GUI &gui, const char *name, const char *table,
         snprintf(pc, sizeof(pc), "-- %%");
     }
     Paint_DrawString_P(icon_end + 3, 1, pc, &PoppinsMd16, WHITE, BLACK);
+
+    // Lux (center).
+    draw_lux_label(lux);
 
     // Keepalive dot (top-right): pulses solid/hollow each second while the app's
     // keepalive writes keep arriving; stays hollow (no pulse) if stale.
@@ -615,7 +639,7 @@ static void draw_gateway_symbol(int cx, int cy, int r)
 }
 
 void config_screen_gateway(GUI &gui, int batt_mv, int batt_pct,
-                           bool app_alive, bool blink)
+                           bool app_alive, bool blink, int lux)
 {
     uint8_t *fb = gui.framebuffer();
 
@@ -633,6 +657,9 @@ void config_screen_gateway(GUI &gui, int batt_mv, int batt_pct,
         snprintf(pc, sizeof(pc), "-- %%");
     }
     Paint_DrawString_P(icon_end + 3, 1, pc, &PoppinsMd16, WHITE, BLACK);
+
+    // Lux (center).
+    draw_lux_label(lux);
 
     const int dx1 = kCanvasW - kMargin;
     const int dx0 = dx1 - 8;

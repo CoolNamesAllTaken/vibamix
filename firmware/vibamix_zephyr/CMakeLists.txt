@@ -28,6 +28,8 @@ target_sources(app PRIVATE
   src/config_gatt.c
   src/ConfigMode.cpp
   src/battery.c
+  src/LTR329ALS.cpp
+  src/ambient_light_sensor.cpp
   src/badge_store.c
   src/dither.c
   src/ota.c
