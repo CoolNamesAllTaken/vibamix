@@ -149,6 +149,7 @@ void GUI::show_als_readings(uint32_t lux, uint32_t gain, uint16_t ch0_raw, uint1
         Paint_DrawString_EN(10, 10, "ALS FAIL:", &Font20, WHITE, BLACK);
         Paint_DrawString_EN(10, 40, diag, &Font16, WHITE, BLACK);
     }
+    Paint_DrawString_EN(10, kCanvasH - 16, APP_GIT_HASH, &Font12, WHITE, BLACK);
     EPD_Display(m_image);
     EPD_Update();
 }
