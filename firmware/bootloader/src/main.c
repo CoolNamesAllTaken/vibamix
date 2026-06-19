@@ -192,10 +192,10 @@ int main(void)
 {
 	printk("\nvbx bootloader\n");
 
-	if (debugger_attached()) {
-		printk("bl: debugger attached -> slot A (dev path)\n");
-		boot_slot(BL_SLOT_A);
-	}
+	// if (debugger_attached()) {
+	// 	printk("bl: debugger attached -> slot A (dev path)\n");
+	// 	boot_slot(BL_SLOT_A);
+	// }
 
 	struct bl_state_rec rec;
 	bool have = (bl_state_read(&rec) == 0);
