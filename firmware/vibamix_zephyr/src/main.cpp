@@ -94,6 +94,16 @@ extern "C" bool app_force_sleep_requested(void)
 	return atomic_get(&s_force_sleep) != 0;
 }
 
+// Set by the SET_CONFIG_MODE mesh opcode (on the BT thread) to request entering
+// config mode; consumed by run_awake_window() on the main thread, so it only takes
+// effect while the badge is awake. Mirrors the s_btn_event "enter config" signal.
+static atomic_t s_enter_config = ATOMIC_INIT(0);
+
+extern "C" void app_request_config_mode(void)
+{
+	atomic_set(&s_enter_config, 1);
+}
+
 // Poll the button level; once it has been held continuously for kForceSleepHoldMs,
 // latch the force-sleep flag, light the user LED as a "hold registered" cue (it's
 // turned off again by gpio_lowpower_for_sleep() when the badge actually powers down),
@@ -262,6 +272,7 @@ static bool run_awake_window(void)
 	// mode) so the window doesn't close the instant it opens.
 	wait_button_release();
 	s_btn_event = false;
+	atomic_clear(&s_enter_config);   // drop any stale mesh enter-config request
 
 	const struct app_config *cfg = app_config_get();
 	const char *id_name  = cfg->name;
@@ -299,7 +310,7 @@ static bool run_awake_window(void)
 	s_gui.wake();
 
 	while ((now = k_uptime_get()) < deadline && !s_btn_event &&
-	       !atomic_get(&s_force_sleep))
+	       !atomic_get(&s_force_sleep) && !atomic_get(&s_enter_config))
 	{
 		if (event_status_consume_heartbeat())
 		{
@@ -365,6 +376,11 @@ static bool run_awake_window(void)
 	if (atomic_get(&s_force_sleep)) {
 		return false;
 	}
+	// A SET_CONFIG_MODE(on) mesh opcode re-enters config mode, same as a button press.
+	if (atomic_get(&s_enter_config)) {
+		atomic_clear(&s_enter_config);
+		return true;
+	}
 	return s_btn_event;
 }
 
@@ -384,7 +400,12 @@ int main(void)
 		gpio_pin_configure_dt(&rf_sw_ctl, GPIO_OUTPUT_ACTIVE);
 	}
 
-	bool config_mode = woke_from_button();
+	// Always wake into the identity frame, whether from a cold boot or a System OFF
+	// button wake. A button press during the awake window then promotes into config
+	// mode (run_awake_window() returns true). Still clear the sticky reset cause so
+	// the next boot reads clean.
+	(void)woke_from_button();
+	bool config_mode = false;
 
 	// Bring the LED strip up first so the boot animation is independent of the
 	// ePaper/mesh. A strip failure is non-fatal — we still deep-sleep below.

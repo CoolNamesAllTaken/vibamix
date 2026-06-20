@@ -20,6 +20,7 @@ enum class LedPattern : uint8_t {
     Breathe = 4,  // chosen color eased up/down in brightness (~2.5 s)
     Comet   = 5,  // chosen-color dot runs across with a fading tail, wrapping
     Sparkle = 6,  // chosen-color twinkles over a dim floor
+    RainbowSparkle = 7,  // rotating rainbow with crackling bright white sparks (color ignored)
 };
 
 // Clamp an on-wire animation code to a valid LedPattern (unknown -> Solid).
@@ -52,6 +53,18 @@ public:
     // Select an animation AND its base color together (does not force Solid).
     // Used to apply a frame's per-frame LED config when it's displayed.
     void set_anim(LedPattern pattern, uint8_t r, uint8_t g, uint8_t b);
+
+    // Force the applied brightness to `level`, overriding the ALS auto-adjust for
+    // the duration of the CURRENT LED state. Any later state change (set_pattern /
+    // set_color / set_anim) clears the override and brightness resumes auto-adjusting.
+    // Live, not stored — e.g. from the SET_BRIGHTNESS mesh opcode.
+    void set_brightness_override(uint8_t level);
+
+    // Release a brightness override (set by set_brightness_override) WITHOUT changing
+    // the current animation/color: brightness resumes ALS auto-adjusting, easing back
+    // to the ambient-derived target. No-op if no override is active. Counterpart to
+    // set_brightness_override — e.g. from the RELEASE_BRIGHTNESS mesh opcode.
+    void clear_brightness_override();
 
     // Re-assert the WS2812 power gate (PMOS on) after a prior off(), e.g. when
     // config mode wants to light a frame's LED again. init() also does this. The
@@ -88,6 +101,7 @@ private:
     void render_breathe();
     void render_comet();
     void render_sparkle();
+    void render_rainbow_sparkle();
     void commit();
     uint32_t rand_next();
 
@@ -95,6 +109,7 @@ private:
     struct led_rgb m_color{};   // RAW (unscaled) base color; brightness applied at render time
     uint8_t        m_brightness{kBrightnessCap};     // applied brightness, slewed toward target
     uint8_t        m_bright_target{kBrightnessCap};  // ALS-derived goal; cap until first valid read
+    volatile bool  m_bright_override{false};         // hold m_brightness, skip ALS slew (current state only)
     LedPattern     m_pattern{LedPattern::Wheel};
     uint32_t       m_tick{0};   // free-running animation frame counter
     uint8_t        m_level[STRIP_NUM_PIXELS]{};  // per-pixel fade state (sparkle)

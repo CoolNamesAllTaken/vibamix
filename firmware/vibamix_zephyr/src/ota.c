@@ -226,3 +226,13 @@ uint8_t ota_inactive_slot(void)
 {
 	return OTHER_SLOT;
 }
+
+uint32_t ota_written(void)
+{
+	return s_written;
+}
+
+uint32_t ota_total(void)
+{
+	return s_total;
+}

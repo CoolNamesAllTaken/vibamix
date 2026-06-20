@@ -54,6 +54,19 @@ static constexpr float kCometTail = 1.8f;            // tail length, in LED unit
 static constexpr uint8_t  kSparkDecay = 10;
 static constexpr uint8_t  kSparkFloor = 12;
 
+// Rainbow-sparkle "crackle": white sparks over a rotating rainbow. Tuned to look
+// like a real sparkler — many short-lived sparks igniting at once, each blinking a
+// few times as it fades (vs. the gentle single-decay Sparkle pattern above).
+// - kCrackleDecay: large -> short spark lifetime (snappy, not a slow ramp).
+// - kCrackleSpawnNum: per-pixel ignition attempts per frame (several can light).
+// - kCrackleSpawnMask: ignite when (rand & mask)==0 -> ~1/(mask+1) chance per attempt.
+// - kCrackleFlickerKeep: min fraction (/255) of a spark's level that always shows;
+//   the rest is gated by a fast per-pixel random flicker so live sparks blink.
+static constexpr uint8_t  kCrackleDecay       = 60;
+static constexpr uint8_t  kCrackleSpawnNum    = 2;
+static constexpr uint32_t kCrackleSpawnMask   = 0x3;   // ~1/4 chance per attempt
+static constexpr uint16_t kCrackleFlickerKeep = 80;    // of 255
+
 // Render thread: draws the active pattern at kFrameMs independent of the main /
 // ePaper loop, so a (blocking) panel refresh can't stall the animation.
 K_THREAD_STACK_DEFINE(s_led_stack, 768);
@@ -142,6 +155,12 @@ void LEDStrip::render_loop()
 
 void LEDStrip::update_brightness()
 {
+    // A manual override holds m_brightness fixed for the current LED state — skip
+    // the ALS poll + slew entirely until the next state change clears the override.
+    if (m_bright_override) {
+        return;
+    }
+
     // Refresh the target ~1 Hz from the latest ALS reading. On an invalid reading
     // (sensor absent / error / pre-first-sample) hold the previous target — which
     // defaults to the cap — so the strip never goes dark on a sensor fault.
@@ -164,6 +183,8 @@ void LEDStrip::update_brightness()
 
 void LEDStrip::set_pattern(LedPattern pattern)
 {
+    // New LED state -> drop any manual brightness override; resume ALS auto-adjust.
+    m_bright_override = false;
     m_pattern = pattern;
 }
 
@@ -174,12 +195,31 @@ void LEDStrip::set_color(uint8_t r, uint8_t g, uint8_t b)
 
 void LEDStrip::set_anim(LedPattern pattern, uint8_t r, uint8_t g, uint8_t b)
 {
+    // New LED state -> drop any manual brightness override; resume ALS auto-adjust.
+    // (set_color() delegates here, so it's covered too.)
+    m_bright_override = false;
     // Store the RAW color; the current brightness (capped, ALS-driven) is applied
     // at render time so a later brightness change affects an already-set color.
     m_color.r = r;
     m_color.g = g;
     m_color.b = b;
     m_pattern = pattern;
+}
+
+void LEDStrip::set_brightness_override(uint8_t level)
+{
+    // Hold this brightness for the current LED state; update_brightness() will skip
+    // the ALS slew until a set_pattern/set_color/set_anim clears the override.
+    m_brightness = level;
+    m_bright_override = true;
+}
+
+void LEDStrip::clear_brightness_override()
+{
+    // Hand brightness back to the ALS auto-adjust without disturbing the current
+    // pattern/color. update_brightness() resumes on the next frame and slews
+    // m_brightness toward the ambient-derived target.
+    m_bright_override = false;
 }
 
 uint32_t LEDStrip::rand_next()
@@ -202,6 +242,7 @@ LedPattern led_pattern_from_code(uint8_t code)
     case (uint8_t)LedPattern::Breathe: return LedPattern::Breathe;
     case (uint8_t)LedPattern::Comet:   return LedPattern::Comet;
     case (uint8_t)LedPattern::Sparkle: return LedPattern::Sparkle;
+    case (uint8_t)LedPattern::RainbowSparkle: return LedPattern::RainbowSparkle;
     default:                           return LedPattern::Solid;
     }
 }
@@ -215,6 +256,7 @@ void LEDStrip::render()
     case LedPattern::Breathe: render_breathe(); break;
     case LedPattern::Comet:   render_comet();   break;
     case LedPattern::Sparkle: render_sparkle(); break;
+    case LedPattern::RainbowSparkle: render_rainbow_sparkle(); break;
     case LedPattern::Off:
     default:                  render_off();     break;
     }
@@ -371,6 +413,46 @@ void LEDStrip::render_sparkle()
         const uint8_t raw_lvl = m_level[i] > kSparkFloor ? m_level[i] : kSparkFloor;
         const uint8_t lvl = (uint8_t)((uint16_t)raw_lvl * m_brightness / 255);
         m_pixels[i] = scale_rgb(m_color, lvl);
+    }
+    commit();
+}
+
+void LEDStrip::render_rainbow_sparkle()
+{
+    // Rotating rainbow base (as in render_rainbow) overlaid with crackling white
+    // sparks. Each spark ignites to full, then blinks a few times as it fades fast.
+    const uint16_t phase = (uint16_t)((m_tick * kRotationStep) % 360);
+    constexpr uint16_t spread = 360 / STRIP_NUM_PIXELS;
+
+    // Crackle update: fast decay so sparks are short-lived, then aggressively ignite
+    // pixels (several attempts/frame) so many sparks crackle at once.
+    for (size_t i = 0; i < STRIP_NUM_PIXELS; i++) {
+        m_level[i] = (m_level[i] > kCrackleDecay) ? (uint8_t)(m_level[i] - kCrackleDecay) : 0;
+    }
+    for (uint8_t s = 0; s < kCrackleSpawnNum; s++) {
+        if ((rand_next() & kCrackleSpawnMask) == 0) {
+            m_level[rand_next() % STRIP_NUM_PIXELS] = 255;
+        }
+    }
+
+    for (size_t i = 0; i < STRIP_NUM_PIXELS; i++) {
+        const uint16_t hue = (phase + i * spread) % 360;
+        struct led_rgb base = hsv_to_rgb(hue, m_brightness);
+
+        // Fast per-pixel flicker: a fraction of the level always shows, the rest is
+        // gated by a random value each frame so a live spark snaps bright/dark -> the
+        // "blink a few times" crackle. intensity is 0..255 of how white this pixel is.
+        const uint16_t flick = kCrackleFlickerKeep +
+                               (uint16_t)(rand_next() & 0xFF) * (255 - kCrackleFlickerKeep) / 255;
+        const uint8_t intensity = (uint8_t)((uint16_t)m_level[i] * flick / 255);
+
+        // Lerp each channel toward the white target (m_brightness) by intensity/255.
+        const uint8_t w = m_brightness;
+        struct led_rgb px{};
+        px.r = (uint8_t)(base.r + ((int16_t)w - base.r) * intensity / 255);
+        px.g = (uint8_t)(base.g + ((int16_t)w - base.g) * intensity / 255);
+        px.b = (uint8_t)(base.b + ((int16_t)w - base.b) * intensity / 255);
+        m_pixels[i] = px;
     }
     commit();
 }

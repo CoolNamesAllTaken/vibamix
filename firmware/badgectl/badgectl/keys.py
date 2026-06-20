@@ -24,8 +24,8 @@ COMPANY_ID = 0x0059
 # Mesh is the BROADCAST surface for every badge at once. Most ops are ephemeral
 # (override live state, store nothing); OP_DISPLAY is the exception — it transfers
 # no content, it just tells every badge to show a frame it already has stored.
-# Per-badge persistent *content* is GATT-only (below). (0x01/0x02/0x0B/0x0C —
-# set name/fun-fact/attendee/frame-LED — were removed; that config moved to GATT.)
+# Per-badge persistent *content* is GATT-only (below). (0x01/0x02 — set name/fun-fact
+# — were removed; that config moved to GATT. 0x0B/0x0C are reused below.)
 OP_SET_LED = 0x03         # anim, r, g, b   (live LED override, not stored)
 OP_IMG_START = 0x04       # le16 size, w, h (render-only image, not stored)
 OP_IMG_DATA = 0x05        # le16 off, bytes
@@ -34,6 +34,9 @@ OP_HEARTBEAT = 0x07       # optional UTF-8 event name (<=8 bytes, keeps it unseg
 OP_SHOW_TEXT_HDR = 0x08   # title           (draw text frame, not stored)
 OP_SHOW_TEXT_BODY = 0x09  # seq, last, body
 OP_DISPLAY = 0x0A         # kind, idx       (show an already-stored frame on all badges)
+OP_SET_BRIGHTNESS = 0x0B  # level           (override LED brightness, live; current state only)
+OP_SET_CONFIG_MODE = 0x0C  # on (1=enter, 0=exit) config mode (awake badges only)
+OP_RELEASE_BRIGHTNESS = 0x0D  # (none)       release brightness override -> resume auto-adjust
 
 # LED animation codes (mirror enum LedPattern in firmware src/LEDStrip.h).
 ANIM_OFF = 0
@@ -43,6 +46,7 @@ ANIM_WHEEL = 3
 ANIM_BREATHE = 4
 ANIM_COMET = 5
 ANIM_SPARKLE = 6
+ANIM_RAINBOW_SPARKLE = 7
 ANIM_NAMES = {
     ANIM_OFF: "Off",
     ANIM_SOLID: "Solid",
@@ -51,6 +55,7 @@ ANIM_NAMES = {
     ANIM_BREATHE: "Breathe",
     ANIM_COMET: "Comet",
     ANIM_SPARKLE: "Sparkle",
+    ANIM_RAINBOW_SPARKLE: "Rainbow Sparkle",
 }
 
 

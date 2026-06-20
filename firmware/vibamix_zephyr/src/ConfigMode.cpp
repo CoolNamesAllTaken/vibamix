@@ -76,6 +76,15 @@ static atomic_t           s_image_pending;
 static atomic_t           s_display_pending;
 static uint8_t            s_pd_kind, s_pd_idx;
 
+// Deferred OTA progress. The f0de0009 DATA writes land on the BT thread once per
+// chunk; cb_ota_progress just records the running byte counts (32-bit atomics are
+// torn-free on the M33) and sets a flag, and the main loop redraws the progress bar
+// — only when the integer percentage changes, so the slow ePaper refresh runs at
+// most ~100 times across the whole transfer regardless of chunk count.
+static atomic_t           s_ota_progress_pending;
+static atomic_t           s_ota_written;
+static atomic_t           s_ota_total;
+
 // Dedicated fast connectable advertiser, run only during config mode so a laptop
 // or phone finds the badge instantly. The mesh proxy's own advertising is slow
 // (~1.9 s Network-ID) and carries the name only in its scan response; this advert
@@ -183,6 +192,14 @@ static void cb_ota_start(uint32_t total)
     if (s_self) { s_self->on_ota_start(total); }
 }
 
+static void cb_ota_progress(uint32_t written, uint32_t total)
+{
+    // BT thread: just record the counts; the main loop redraws the bar.
+    atomic_set(&s_ota_written, (atomic_val_t)written);
+    atomic_set(&s_ota_total, (atomic_val_t)total);
+    atomic_set(&s_ota_progress_pending, 1);
+}
+
 static void cb_ota_end(bool ok)
 {
     if (s_self) { s_self->on_ota_end(ok); }
@@ -215,6 +232,12 @@ void config_mode_on_button(void)
     if (s_self) { s_self->request_exit(); }
 }
 
+void config_mode_request_exit(void)
+{
+    // Same effect as the button-exit path; no-op when config mode isn't running.
+    if (s_self) { s_self->request_exit(); }
+}
+
 void config_mode_on_heartbeat(void)
 {
     atomic_set(&s_heartbeat_pending, 1);
@@ -237,6 +260,7 @@ static const struct config_gatt_callbacks s_gatt_cb = {
     .on_frame_led = cb_frame_led,
     .on_mesh_tx   = cb_mesh_tx,
     .on_ota_start = cb_ota_start,
+    .on_ota_progress = cb_ota_progress,
     .on_ota_end   = cb_ota_end,
     .on_keepalive = cb_keepalive,
 };
@@ -347,12 +371,16 @@ void ConfigMode::on_display(uint8_t kind, uint8_t idx)
 
 void ConfigMode::on_ota_start(uint32_t total)
 {
+    ARG_UNUSED(total);
     // Take over the panel so the countdown stops repainting, and warn the user.
+    // Paint the 0% progress frame and establish it as the partial-refresh base; the
+    // main loop then advances the bar in place via refresh_partial as chunks arrive.
     s_content_shown = true;
     note_activity();
     if (m_gui) {
         m_gui->wake();
-        m_gui->show_text("Updating firmware", "Do not power off");
+        config_screen_ota(*m_gui, 0);
+        m_gui->set_base_map();
     }
 }
 
@@ -457,6 +485,8 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
     bool    ka_blink = false;
     int     ka_tick = 0;
     bool    gw_shown = false;   // last connected-screen variant (false=Connected, true=Mesh Gateway)
+    int     ota_pct_shown = -1; // last OTA progress percentage painted (-1 = none yet)
+    int     ota_tick = 0;       // partial-refresh counter for the OTA bar
     // True once the currently-shown content frame has been (re)established as the
     // partial-refresh base while the panel is awake — so the keepalive dot can be
     // partial-refreshed over it. Invalidated whenever a content frame is rendered
@@ -498,6 +528,25 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
         if (atomic_cas(&s_display_pending, 1, 0)) {
             mesh->on_display_screen(s_pd_kind, s_pd_idx);
             content_based = false;   // new frame on the panel; re-base before partial refresh
+            note_activity();
+        }
+
+        // Advance the OTA progress bar (deferred from the BT thread). Redraw only on
+        // an integer-percent change so the ePaper refresh runs at most ~100 times for
+        // the whole image; a periodic full refresh clears partial-refresh ghosting.
+        if (atomic_cas(&s_ota_progress_pending, 1, 0)) {
+            uint32_t w = (uint32_t)atomic_get(&s_ota_written);
+            uint32_t t = (uint32_t)atomic_get(&s_ota_total);
+            int pct = t ? (int)((uint64_t)w * 100 / t) : 0;
+            if (pct != ota_pct_shown) {
+                ota_pct_shown = pct;
+                config_screen_ota(*gui, pct);
+                if (++ota_tick % kFullRefreshEvery == 0) {
+                    gui->set_base_map();
+                } else {
+                    gui->refresh_partial();
+                }
+            }
             note_activity();
         }
 

@@ -549,6 +549,9 @@ static ssize_t ota_write_char(struct bt_conn *conn, const struct bt_gatt_attr *a
 		if (ota_write(sys_get_le32(p + 1), p + 5, len - 5) != 0) {
 			return BT_GATT_ERR(BT_ATT_ERR_UNLIKELY);
 		}
+		if (s_cb && s_cb->on_ota_progress) {
+			s_cb->on_ota_progress(ota_written(), ota_total());
+		}
 		break;
 	case OP_END: {
 		int err = ota_finish(sys_get_le32(p + 1));

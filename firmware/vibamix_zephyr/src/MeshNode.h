@@ -62,6 +62,12 @@ public:
     // straight to the panel — neither is stored.
     void on_show_led(uint8_t anim, uint8_t r, uint8_t g, uint8_t b);
     void on_show_text(const char *title, size_t tlen, const char *body, size_t blen);
+    // Override LED brightness for the current LED state (cleared by the next state change).
+    void on_set_brightness(uint8_t level);
+    // Release a brightness override (resume ALS auto-adjust) without changing the LED state.
+    void on_release_brightness();
+    // Enter (on=1) / exit (on=0) config mode. Best-effort, awake badges only.
+    void on_set_config_mode(uint8_t on);
 
     // Config-mode gateway: re-originate a vendor-model access payload (sent by a
     // GATT-connected app) onto the mesh "all badges" group.

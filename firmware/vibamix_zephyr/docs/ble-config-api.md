@@ -555,9 +555,12 @@ Vendor opcodes (company ID `0x0059`, 3‑byte `0x_C0_<b0>_<cid>`):
 | `0x04` / `0x05` / `0x06` | IMG START / DATA / END | `le16 size,w,h` / `le16 off,bytes` / `le32 crc32` | Flood a **render‑only** 1‑bit image (best‑effort; a dropped segment fails the frame). |
 | `0x07` | HEARTBEAT | optional UTF‑8 event name (≤ 8 B) | Keep‑awake beat (below). |
 | `0x08` / `0x09` | SHOW_TEXT hdr / body | header / `seq,last,body` | Draw an **ephemeral** text frame (not stored). |
+| `0x0B` | SET_BRIGHTNESS | `u8 level` | Override LED brightness (0–255) on every badge, overriding the ambient‑light auto‑adjust, for the **current LED state only**. Any later LED state change (SET_LED / new frame) resumes auto‑brightness. Live, not stored. |
+| `0x0C` | SET_CONFIG_MODE | `u8 on` | Enter (`1`) / exit (`0`) config mode on every badge. **Best‑effort: only reaches badges that are currently awake** — a System OFF badge's radio is down and never sees it (press its button instead). The originating gateway badge ignores it (so the operator isn't kicked out of its own session). |
+| `0x0D` | RELEASE_BRIGHTNESS | (none) | Release a `SET_BRIGHTNESS` override on every badge — brightness resumes the ambient‑light auto‑adjust **without** changing the running animation/color. Pairs with `0x0B`. |
 
 > Removed opcodes (now GATT‑only): `0x01` set‑name, `0x02` set‑fun‑fact, `0x0A` display‑stored,
-> `0x0B` set‑attendee, `0x0C` set‑frame‑LED.
+> set‑attendee, set‑frame‑LED. (`0x0B`/`0x0C` are now reused for brightness / config‑mode above.)
 
 **Laptop / phone as a mesh gateway.** A host with no mesh radio injects these by writing a complete
 vendor‑model access payload (the 3‑byte opcode + params) to the **Mesh‑TX** characteristic

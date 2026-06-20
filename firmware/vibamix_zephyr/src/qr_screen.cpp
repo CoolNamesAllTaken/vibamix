@@ -202,6 +202,10 @@ void qr_screen_draw(GUI &gui, const char *code, const char *url,
 
     draw_status_bar(batt_mv, batt_pct, remaining_sec, total_sec, lux);
 
+    // Reserved height of the bottom "press to exit" bar (drawn last). Declared here
+    // so the QR sizing below leaves room for it.
+    const int bar_h = 20;
+
     // Body: QR (left, in a fixed-width box so the right column stays put), and
     // the heading / prompt / code (right).
     const int body_y = 40;
@@ -213,7 +217,7 @@ void qr_screen_draw(GUI &gui, const char *code, const char *url,
         const int quiet = 4;                 // standard QR quiet zone (modules)
         const int cells = n + 2 * quiet;
         const int avail_w = kQrBox - kMargin;
-        const int avail_h = kCanvasH - body_y - 2;
+        const int avail_h = kCanvasH - bar_h - body_y - 2;   // leave room for the exit bar
         int scale = (avail_w < avail_h ? avail_w : avail_h) / cells;
         if (scale < 2) {
             scale = 2;
@@ -245,6 +249,14 @@ void qr_screen_draw(GUI &gui, const char *code, const char *url,
     char idline[24];
     snprintf(idline, sizeof(idline), "Badge ID: %s", code ? code : "");
     Paint_DrawString_P(rx, ry + 8, idline, &PoppinsMd16, WHITE, BLACK);
+
+    // Bottom bar: an inverted strip with the exit instruction, consistent with the
+    // Connected / Mesh Gateway config screens.
+    const int by0 = kCanvasH - bar_h;
+    fill_rect(0, by0, kCanvasW - 1, kCanvasH - 1);
+    const char *exit_lbl = "Press the button to exit";
+    const int ew = Paint_StringWidth_P(exit_lbl, &PoppinsMd16);
+    Paint_DrawString_P((kCanvasW - ew) / 2, by0 + 2, exit_lbl, &PoppinsMd16, BLACK, WHITE);
 }
 
 // Blit a 2-bit grayscale source (4 px/byte, MSB-first, row-major, level 0=black..
@@ -706,4 +718,46 @@ void config_screen_gateway(GUI &gui, int batt_mv, int batt_pct,
     const int ew = Paint_StringWidth_P(exit_lbl, &PoppinsMd16);
     Paint_DrawString_P((kCanvasW - ew) / 2, by0 + 4, exit_lbl,
                        &PoppinsMd16, BLACK, WHITE);
+}
+
+void config_screen_ota(GUI &gui, int pct)
+{
+    if (pct < 0) {
+        pct = 0;
+    } else if (pct > 100) {
+        pct = 100;
+    }
+
+    uint8_t *fb = gui.framebuffer();
+    Paint_NewImage(fb, EPD_WIDTH, EPD_HEIGHT, ROTATE_270, WHITE);
+    Paint_Clear(WHITE);
+
+    // Heading.
+    Paint_DrawString_P(kMargin, 30, "Updating firmware", &PoppinsSB24, WHITE, BLACK);
+
+    // Wide progress bar, centered, in the middle of the panel.
+    const int bx0 = kMargin;
+    const int bx1 = kCanvasW - kMargin;
+    const int by0 = 84;
+    const int by1 = 110;          // 26px tall outline
+    draw_rect(bx0, by0, bx1, by1);
+    const int inner_w = (bx1 - bx0) - 3;   // inset by 2px each side, inclusive
+    const int fw = inner_w * pct / 100;
+    if (fw > 0) {
+        fill_rect(bx0 + 2, by0 + 2, bx0 + 2 + fw - 1, by1 - 2);
+    }
+
+    // Numeric percentage, centered under the bar.
+    char pc[8];
+    snprintf(pc, sizeof(pc), "%d%%", pct);
+    const int pw = Paint_StringWidth_P(pc, &PoppinsMd20);
+    Paint_DrawString_P((kCanvasW - pw) / 2, by1 + 8, pc, &PoppinsMd20, WHITE, BLACK);
+
+    // Bottom bar: the "do not power off" warning, inverted so it's unmissable.
+    const int bar_h = 24;
+    const int wy0 = kCanvasH - bar_h;
+    fill_rect(0, wy0, kCanvasW - 1, kCanvasH - 1);
+    const char *warn = "Do not power off";
+    const int ww = Paint_StringWidth_P(warn, &PoppinsMd16);
+    Paint_DrawString_P((kCanvasW - ww) / 2, wy0 + 4, warn, &PoppinsMd16, BLACK, WHITE);
 }

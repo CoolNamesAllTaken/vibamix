@@ -87,6 +87,26 @@ def _erase_chip(selector: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def reset_device(selector: str) -> tuple[bool, str]:
+    """Soft-reset one target via `probe-rs reset` (no flash, contents preserved).
+
+    Pulses the target reset over SWD so the running firmware cold-boots again;
+    RRAM (mesh provisioning / settings / stored images) and the bistable ePaper
+    image are untouched. The standalone counterpart to the post-flash reset in
+    `flash_device`."""
+    try:
+        proc = subprocess.run(
+            _reset_cmd(selector),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=20)
+    except FileNotFoundError:
+        return False, "probe-rs not found"
+    except subprocess.TimeoutExpired:
+        return False, "reset: timeout"
+    if proc.returncode != 0:
+        return False, f"reset: probe-rs exited {proc.returncode}"
+    return True, "ok"
+
+
 def _write_factory_id(selector: str, factory_id: int) -> tuple[bool, str]:
     """Write the 8-byte factory record (magic, id, ~id) to the factory partition."""
     if not (1 <= factory_id <= flashconfig.FACTORY_ID_MAX):

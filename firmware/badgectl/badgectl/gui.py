@@ -11,7 +11,15 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PyQt6.QtCore import QSortFilterProxyModel, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon, QImage, QKeySequence, QPixmap, QShortcut
+from PyQt6.QtGui import (
+    QColor,
+    QGuiApplication,
+    QIcon,
+    QImage,
+    QKeySequence,
+    QPixmap,
+    QShortcut,
+)
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -19,6 +27,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -29,6 +38,8 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
+    QSlider,
     QSpinBox,
     QSplitter,
     QTableView,
@@ -91,12 +102,18 @@ class MainWindow(QMainWindow):
     flash_progress = pyqtSignal(str, float, str)   # probe label, percent, phase
     flash_result = pyqtSignal(str, bool, str)      # probe label, ok, message
     flash_finished = pyqtSignal(int, int)          # ok count, total
+    reset_finished = pyqtSignal(int, int)          # ok count, total (probe-rs reset)
 
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("badgectl — vibamix")
         self.setWindowIcon(QIcon(str(Path(__file__).parent / "assets" / "icon.png")))
-        self.resize(1280, 800)
+        # Fit the host laptop's *available* display (excludes menu bar / dock /
+        # taskbar) so the window never opens taller than a short screen, while
+        # keeping the roomy default on large monitors.
+        avail = QGuiApplication.primaryScreen().availableGeometry()
+        self.setMinimumSize(min(800, avail.width()), min(480, avail.height()))
+        self.resize(min(1280, avail.width()), min(800, avail.height()))
         self.setStyleSheet(STYLE)
 
         self.link = BadgeLink()
@@ -261,15 +278,26 @@ class MainWindow(QMainWindow):
         self.forget_btn.setEnabled(d is not None)
 
     # ---------- action pane (right) ----------
+    def _scrollable(self, w: QWidget) -> QScrollArea:
+        """Wrap a tab's content so it scrolls internally instead of clipping on
+        short screens. With setWidgetResizable the content keeps its top-aligned
+        full-height look and only grows a scrollbar when the pane is too short."""
+        sa = QScrollArea()
+        sa.setWidgetResizable(True)
+        sa.setFrameShape(QFrame.Shape.NoFrame)
+        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        sa.setWidget(w)
+        return sa
+
     def _build_action_pane(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
         v.addWidget(self._build_conn_header())
         tabs = QTabWidget()
         tabs.addTab(self._build_gatt_tab(), "Direct (GATT)")
-        tabs.addTab(self._build_mesh_tab(), "Mesh")
-        tabs.addTab(self._build_batch_tab(), "Batch")
-        tabs.addTab(self._build_flash_tab(), "Flash")
+        tabs.addTab(self._scrollable(self._build_mesh_tab()), "Mesh")
+        tabs.addTab(self._scrollable(self._build_batch_tab()), "Batch")
+        tabs.addTab(self._scrollable(self._build_flash_tab()), "Flash")
         v.addWidget(tabs, 1)
         return w
 
@@ -429,10 +457,10 @@ class MainWindow(QMainWindow):
     def _build_gatt_tab(self) -> QWidget:
         self._gatt_actions = []
         inner = QTabWidget()
-        inner.addTab(self._build_id_subtab(), "Identity")
-        inner.addTab(self._build_text_subtab(), "Text frames")
-        inner.addTab(self._build_image_subtab(), "Image frames")
-        inner.addTab(self._build_fw_subtab(), "Firmware")
+        inner.addTab(self._scrollable(self._build_id_subtab()), "Identity")
+        inner.addTab(self._scrollable(self._build_text_subtab()), "Text frames")
+        inner.addTab(self._scrollable(self._build_image_subtab()), "Image frames")
+        inner.addTab(self._scrollable(self._build_fw_subtab()), "Firmware")
         return inner
 
     # -- shared per-frame LED + display helpers (state keyed by `which`) --
@@ -858,6 +886,20 @@ class MainWindow(QMainWindow):
         info.setStyleSheet("color:#9aa4b2;")
         v.addWidget(info)
 
+        # PARTY MODE: one-click rainbow-sparkle @ full brightness on the whole fleet.
+        # Toggles: a second click releases brightness control and sends every badge
+        # back to its identity frame. The button pulses a scrolling rainbow while on.
+        self._party_on = False
+        self._party_phase = 0.0
+        self._party_timer = QTimer(self)
+        self._party_timer.timeout.connect(self._party_pulse)
+        self.party_btn = QPushButton("🦄  PARTY MODE  🌈")
+        self.party_btn.setObjectName("party")
+        self.party_btn.setMinimumHeight(48)
+        self.party_btn.setStyleSheet(self._party_style(0.0))
+        self.party_btn.clicked.connect(self._toggle_party)
+        v.addWidget(self.party_btn)
+
         g = QGroupBox("Event heartbeat (mesh — keep badges awake)")
         gl = QHBoxLayout(g)
         self.m_event = QLineEdit()
@@ -900,6 +942,51 @@ class MainWindow(QMainWindow):
         gl.addWidget(self.m_anim)
         gl.addStretch()
         gl.addWidget(cb)
+        v.addWidget(g)
+
+        # Brightness override: pin LED brightness on every badge, overriding the
+        # ambient-light auto-adjust. Lasts for the current LED state only — the next
+        # animation/color/frame change resumes auto-brightness.
+        g = QGroupBox("Brightness — override all badges (current LED state only)")
+        gl = QHBoxLayout(g)
+        self.m_bright = QSlider(Qt.Orientation.Horizontal)
+        self.m_bright.setRange(0, 255)
+        self.m_bright.setValue(255)
+        self.m_bright_val = QLabel("255")
+        self.m_bright.valueChanged.connect(
+            lambda v: self.m_bright_val.setText(str(v)))
+        bb = QPushButton("Send Brightness")
+        bb.clicked.connect(lambda: self._go(self._mesh_send(
+            keys.OP_SET_BRIGHTNESS, bytes([self.m_bright.value()]))))
+        # Hand brightness back to each badge's ambient-light auto-adjust without
+        # changing the running animation/color.
+        rb = QPushButton("Release (auto)")
+        rb.setObjectName("ghost")
+        rb.clicked.connect(lambda: self._go(self._mesh_send(
+            keys.OP_RELEASE_BRIGHTNESS, b"")))
+        gl.addWidget(QLabel("Level"))
+        gl.addWidget(self.m_bright)
+        gl.addWidget(self.m_bright_val)
+        gl.addWidget(bb)
+        gl.addWidget(rb)
+        v.addWidget(g)
+
+        # Config mode: remotely enter/exit config mode (QR onboarding screen +
+        # connectable advertiser). Best-effort — only reaches badges that are
+        # currently awake (a sleeping badge's radio is off; press its button).
+        g = QGroupBox("Config mode — toggle on all awake badges")
+        gl = QHBoxLayout(g)
+        cm_on = QPushButton("Enter config mode")
+        cm_on.clicked.connect(lambda: self._go(self._mesh_send(
+            keys.OP_SET_CONFIG_MODE, bytes([1]))))
+        cm_off = QPushButton("Exit config mode")
+        cm_off.setObjectName("ghost")
+        cm_off.clicked.connect(lambda: self._go(self._mesh_send(
+            keys.OP_SET_CONFIG_MODE, bytes([0]))))
+        gl.addWidget(QLabel("Awake badges only"))
+        gl.addStretch()
+        gl.addWidget(cm_on)
+        gl.addWidget(cm_off)
         v.addWidget(g)
 
         # Show text: draw a text frame straight to every badge's panel. Not stored
@@ -1002,7 +1089,9 @@ class MainWindow(QMainWindow):
             "SWD (probe-rs), in parallel. Build the images first with "
             "vibamix_zephyr/scripts/build_slots.sh — the app must be the trailered "
             "slotA.bin so the bootloader's CRC check passes and the board boots "
-            "standalone. Independent of the BLE connection above.")
+            "standalone. Independent of the BLE connection above. Or use Reset all "
+            "to soft-reboot every attached board (probe-rs reset) without reflashing "
+            "— stored content is preserved.")
         info.setWordWrap(True)
         info.setStyleSheet("color:#9aa4b2;")
         v.addWidget(info)
@@ -1047,16 +1136,21 @@ class MainWindow(QMainWindow):
         self.fl_refresh = QPushButton("Refresh probes")
         self.fl_refresh.setObjectName("ghost")
         self.fl_refresh.clicked.connect(self._refresh_probes)
+        self.fl_reset = QPushButton("Reset all")
+        self.fl_reset.setObjectName("ghost")
+        self.fl_reset.clicked.connect(self._reset_all)
         self.fl_flash = QPushButton("Flash all")
         self.fl_flash.clicked.connect(self._flash_all)
         row.addWidget(self.fl_refresh)
         row.addStretch()
+        row.addWidget(self.fl_reset)
         row.addWidget(self.fl_flash)
         v.addLayout(row)
 
         self.flash_progress.connect(self._on_flash_progress)
         self.flash_result.connect(self._on_flash_result)
         self.flash_finished.connect(self._on_flash_finished)
+        self.reset_finished.connect(self._on_reset_finished)
 
         self._fl_timer = QTimer(self)   # poll for plugged/unplugged probes
         self._fl_timer.setInterval(2_000)
@@ -1126,6 +1220,7 @@ class MainWindow(QMainWindow):
         self._flash_running = True
         self._fl_timer.stop()
         self.fl_flash.setEnabled(False)
+        self.fl_reset.setEnabled(False)
         self.fl_refresh.setEnabled(False)
         for p in targets:
             self._set_probe_status(p.label, "queued")
@@ -1172,8 +1267,52 @@ class MainWindow(QMainWindow):
         self._flash_running = False
         self.fl_refresh.setEnabled(True)
         self.fl_flash.setEnabled(True)
+        self.fl_reset.setEnabled(True)
         self._fl_timer.start()
         self._log(f"Flash complete: {ok}/{total} ok.")
+
+    def _reset_all(self) -> None:
+        """Soft-reset every attached probe (probe-rs reset) — no reflash."""
+        if self._flash_running:
+            return
+        targets = list(self._fl_probes)
+        if not targets:
+            self._log("Reset: no probes detected.")
+            return
+        self._flash_running = True   # shared busy flag: flash/reset can't overlap
+        self._fl_timer.stop()
+        self.fl_flash.setEnabled(False)
+        self.fl_reset.setEnabled(False)
+        self.fl_refresh.setEnabled(False)
+        for p in targets:
+            self._set_probe_status(p.label, "queued")
+        self._log(f"Resetting {len(targets)} probe(s) …")
+
+        t = threading.Thread(target=self._reset_worker, args=(targets,), daemon=True)
+        t.start()
+
+    def _reset_worker(self, targets) -> None:
+        """Runs off the Qt thread: one probe-rs reset per probe, bounded pool."""
+        def one(p: probes.Probe) -> bool:
+            self.flash_progress.emit(p.label, 0.0, "resetting")
+            ok, msg = flash.reset_device(p.selector)
+            self.flash_result.emit(p.label, ok, msg)
+            return ok
+
+        ok_count = 0
+        try:
+            with ThreadPoolExecutor(max_workers=flashconfig.MAX_CONCURRENT) as ex:
+                ok_count = sum(1 for r in ex.map(one, targets) if r)
+        finally:
+            self.reset_finished.emit(ok_count, len(targets))
+
+    def _on_reset_finished(self, ok: int, total: int) -> None:
+        self._flash_running = False
+        self.fl_refresh.setEnabled(True)
+        self.fl_flash.setEnabled(True)
+        self.fl_reset.setEnabled(True)
+        self._fl_timer.start()
+        self._log(f"Reset complete: {ok}/{total} ok.")
 
     def _cancel_batch(self) -> None:
         self._batch_cancel = True
@@ -1282,6 +1421,54 @@ class MainWindow(QMainWindow):
         await self.link.mesh_tx(keys.vendor_opcode(op) + params)
         self._last_link = time.monotonic()  # a completed acked write proves the link is up
         self._log(f"mesh op 0x{op:02x} broadcast ({len(params)}B params)")
+
+    # ---------- PARTY MODE 🦄🌈 ----------
+    def _party_style(self, phase: float) -> str:
+        # A scrolling rainbow gradient for the button background. `phase` (0..1)
+        # offsets the hue of every stop, so animating it makes the rainbow flow.
+        n = 6
+        stops = []
+        for i in range(n + 1):
+            hue = (phase + i / n) % 1.0
+            c = QColor.fromHsvF(hue, 0.85, 1.0)
+            stops.append(f"stop:{i / n:.3f} {c.name()}")
+        grad = "qlineargradient(x1:0, y1:0, x2:1, y2:0, " + ", ".join(stops) + ")"
+        return (
+            f"QPushButton#party {{ background: {grad}; color: white; "
+            "font-size: 18px; font-weight: 800; border: none; border-radius: 10px; "
+            "padding: 10px; }"
+        )
+
+    def _party_pulse(self) -> None:
+        self._party_phase = (self._party_phase + 0.02) % 1.0
+        self.party_btn.setStyleSheet(self._party_style(self._party_phase))
+
+    def _toggle_party(self) -> None:
+        self._party_on = not self._party_on
+        if self._party_on:
+            self.party_btn.setText("🎉  PARTY MODE: ON — click to stop  🎉")
+            self._party_timer.start(60)   # ~17 fps rainbow scroll
+            self._go(self._party_start())
+        else:
+            self._party_timer.stop()
+            self.party_btn.setText("🦄  PARTY MODE  🌈")
+            self.party_btn.setStyleSheet(self._party_style(0.0))
+            self._go(self._party_stop())
+
+    async def _party_start(self) -> None:
+        # Rainbow sparkle on every badge, pinned to full brightness. The pattern
+        # ignores the color bytes, so they're arbitrary here.
+        await self._mesh_send(keys.OP_SET_LED,
+                              bytes([keys.ANIM_RAINBOW_SPARKLE, 255, 255, 255]))
+        await self._mesh_send(keys.OP_SET_BRIGHTNESS, bytes([255]))
+        self._log("PARTY MODE ON — rainbow sparkle @ full brightness on all badges 🎉")
+
+    async def _party_stop(self) -> None:
+        # Hand brightness back to ambient auto-adjust and send every badge home.
+        await self._mesh_send(keys.OP_RELEASE_BRIGHTNESS, b"")
+        await self._mesh_send(keys.OP_DISPLAY,
+                              bytes([keys.DISP_KIND_IDENTITY, 0]))
+        self._log("PARTY MODE OFF — brightness released, badges back to identity.")
 
     async def _send_heartbeat(self) -> None:
         # Carry the event name (≤8 bytes keeps the access payload unsegmented, so

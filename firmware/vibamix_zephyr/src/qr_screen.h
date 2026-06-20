@@ -36,6 +36,13 @@ void config_screen_connected(GUI &gui, const char *name, const char *table,
 void config_screen_gateway(GUI &gui, int batt_mv, int batt_pct,
                            bool app_alive, bool blink, int lux);
 
+/* OTA progress screen — shown while a firmware image streams in over the config
+ * GATT service. A "Updating firmware" heading, a "Do not power off" warning, and a
+ * wide progress bar (with a numeric NN% label) that fills as `pct` (0..100) climbs.
+ * Drawn into the framebuffer like the other config screens; the caller picks the
+ * refresh (full base map for the first frame, partial for each advance). */
+void config_screen_ota(GUI &gui, int pct);
+
 /* Identity frame (the badge's resting home screen): an optional identity image
  * (2-bit grayscale, authored on the 264x176 landscape canvas) filling the main
  * area, over a thin bottom banner holding the attendee name (left) + attendee ID
