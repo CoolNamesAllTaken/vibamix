@@ -30,7 +30,7 @@
 #define VIBAMIX_CONFIG_QR_PREFIX "vibamix://connect?name=vibamix-"
 
 // How long to stay awake with no activity before powering off.
-static constexpr int64_t kConfigWindowMs = 180 * 1000;
+static constexpr int64_t kConfigWindowMs = 600 * 1000;
 
 // How often to do a full refresh (clears partial-refresh ghosting), in countdown ticks.
 static constexpr int kFullRefreshEvery = 30;

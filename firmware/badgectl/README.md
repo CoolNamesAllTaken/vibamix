@@ -29,7 +29,11 @@ addresses, so badges are listed by their advertised name `vibamix-XXXX`.)
    text. **Stored content (name, table ID, stored frames, display selection) is GATT-only** — set it
    per badge over the Direct tab.
 
-5. **Flash** tab — bulk-flashes firmware to attached badges over **SWD** (probe-rs), independent of
+5. **Batch** tab — runs **one** GATT action (using the Direct-tab values) on every *checked* badge,
+   one at a time (connect → do → disconnect).
+6. **Bulk (XLSX)** tab — programs **full per-badge content** (identity image + name/id, text frames,
+   image slots) from a spreadsheet. See **Bulk content programming (XLSX)** below.
+7. **Flash** tab — bulk-flashes firmware to attached badges over **SWD** (probe-rs), independent of
    BLE. Flashes the bootloader + a *bootable* app to **every plugged-in probe at once** and assigns
    each a unique factory id. See **Flashing firmware (SWD)** below.
 
@@ -42,6 +46,50 @@ GATT Proxy anymore — a badge is connectable only in config mode.) That badge i
 a broadcast only reaches **other badges that are also awake**. Use the **Auto heartbeat** toggle to
 hold a fleet of (already-woken) badges awake. A heartbeat can **not** wake a sleeping badge — its
 radio is off in deep sleep.
+
+## Bulk content programming (XLSX)
+
+The **Bulk (XLSX)** tab provisions a fleet's *flash content* from a spreadsheet — one **row per
+badge**, applied in order to the **checked** devices (row 1 → first checked badge, etc.). It reuses
+the per-badge GATT writes (identity / text frame / image slot), so put each target badge in config
+mode and check it first.
+
+At run start it **opens a connection to every checked badge at once and holds them with a 1 Hz
+keepalive**, so badges late in the queue don't hit their config-mode timeout and sleep before they're
+programmed; it then writes each badge's content in turn and disconnects them all at the end. (Holding
+many simultaneous BLE connections depends on your laptop's Bluetooth controller — some support fewer
+than ~20; badges that fail to connect are marked failed and skipped, the rest still program.)
+
+1. **Save template…** writes a starter `.xlsx` with the recognized header row + an example.
+2. Fill in one row per badge, **Load XLSX…**, review the summary + any warnings in the log, then
+   **Run on checked**. Mismatched counts program the first `min(rows, checked)` and warn.
+
+Columns are **named headers** (case-insensitive, any order — omit unoccupied frames). Recognized:
+
+| Header | Meaning |
+|--------|---------|
+| `name` | identity display name (≤31 B) |
+| `attendee_id` (aliases `attendee`, `table_id`) | identity attendee/table id (≤10 B) |
+| `identity_image` | path to the identity background image |
+| `identity_image_fmt` | `bw` or `gray2` (optional; default `gray2`) |
+| `text_label_N` / `text_body_N` | text frame N (N = 1..20 → slot idx N-1) — the label/contents pair |
+| `image_N` | path for image slot N (N = 1..4 → slot N-1) |
+| `image_N_fmt` | `bw` or `gray2` for slot N (optional; default `gray2`) |
+| `identity_led` / `identity_anim` | identity-frame LED color / animation (optional) |
+| `text_led_N` / `text_anim_N` | text frame N LED color / animation (optional) |
+| `image_led_N` / `image_anim_N` | image slot N LED color / animation (optional) |
+
+Image cells are file paths resolved relative to the sheet's directory and are validated on **Load**:
+if any referenced image is missing or can't be decoded, the load fails with an error listing every
+bad image (fix them before running). Blank cells / absent columns are left unchanged on the badge.
+Identity name + attendee id are written only when present.
+
+**Per-frame LED:** a `*_led` cell is a color **name** (`red`, `orange`, `white`, `teal`, …) or
+**hex** (`#ff8800`, `ff8800`, or 3-digit `#f80`); a `*_anim` cell is an animation name (`off`,
+`solid`, `rainbow`, `wheel`, `breathe`, `comet`, `sparkle`, `rainbow sparkle`) or its 0–7 code. If a
+frame has a color but no animation it defaults to **Solid**; an animation with no color runs on
+black; a frame with neither stays **Off**. Identity LED is written together with the name (there is
+no LED-only identity write), so it is applied only on rows that also set `name`/`attendee_id`.
 
 ## Flashing firmware (SWD)
 
@@ -97,9 +145,10 @@ serial and persisted to `~/.badgectl/serials.json`. **Back that file up** — lo
 | `badgectl/mesh.py` | Bluetooth-Mesh proxy-client crypto + PDU/segmentation builder. |
 | `badgectl/ble.py` | bleak scan + one connection (GATT framing + proxy write). |
 | `badgectl/imageconv.py` | Pillow → 1-bit framebuffer / 2-bit grayscale packing. |
+| `badgectl/bulkprog.py` | XLSX bulk-content parser → per-badge `RowSpec` (identity/text/image). |
 | `badgectl/seqstore.py` | Persisted mesh sequence number. |
 | `badgectl/probes.py` | Enumerate attached CMSIS-DAP probes via `probe-rs list`. |
 | `badgectl/flash.py` | probe-rs flashing backend (bootloader + app + factory id). |
 | `badgectl/serialreg.py` | Per-unit factory-id assignment + persistence. |
 | `badgectl/flashconfig.py` | Flash constants + default artifact paths. |
-| `badgectl/gui.py` | PyQt6 window (GATT + Mesh + Batch + Flash panels, log console). |
+| `badgectl/gui.py` | PyQt6 window (GATT + Mesh + Batch + Bulk + Flash panels, log console). |

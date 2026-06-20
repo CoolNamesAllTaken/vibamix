@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -52,8 +53,8 @@ from PyQt6.QtWidgets import (
 
 from bleak.exc import BleakDeviceNotFoundError
 
-from . import flash, flashconfig, imageconv, keys, probes, serialreg
-from .ble import BadgeLink, Found, Scanner
+from . import bulkprog, flash, flashconfig, imageconv, keys, probes, serialreg
+from .ble import BadgeLink, Found, Scanner, scan_all
 from .devices import COL_CHECK, COL_NAME, DeviceModel
 from .mesh import MeshCrypto, MeshSession
 from .seqstore import SeqStore
@@ -139,6 +140,10 @@ class MainWindow(QMainWindow):
         self._last_link = 0.0   # last successful GATT round-trip (any direction) — link health
         self._batch_running = False
         self._batch_cancel = False
+
+        # bulk (XLSX) content-programming state
+        self._bulk_rows: list[bulkprog.RowSpec] = []
+        self._img_cache: dict[tuple[str, int], bytes] = {}
 
         # flash (SWD bulk-flash) state
         self._flash_running = False
@@ -298,6 +303,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_gatt_tab(), "Direct (GATT)")
         tabs.addTab(self._scrollable(self._build_mesh_tab()), "Mesh")
         tabs.addTab(self._scrollable(self._build_batch_tab()), "Batch")
+        tabs.addTab(self._scrollable(self._build_bulk_tab()), "Bulk (XLSX)")
         tabs.addTab(self._scrollable(self._build_flash_tab()), "Flash")
         v.addWidget(tabs, 1)
         return w
@@ -1240,7 +1246,11 @@ class MainWindow(QMainWindow):
 
     def _flash_worker(self, targets, images, want_factory: bool, want_erase: bool) -> None:
         """Runs off the Qt thread: one probe-rs flash per probe, bounded pool."""
-        def one(p: probes.Probe) -> bool:
+        def one(item: tuple[int, probes.Probe]) -> bool:
+            idx, p = item
+            # Ramp the starts so 20 probes don't attach to the hub at the same
+            # instant (the contention that produces transient probe-rs failures).
+            time.sleep(idx * flashconfig.STAGGER_STEP_S)
             try:
                 fid = serialreg.assign_for(p.serial) if want_factory else None
             except RuntimeError as e:
@@ -1257,7 +1267,7 @@ class MainWindow(QMainWindow):
         ok_count = 0
         try:
             with ThreadPoolExecutor(max_workers=flashconfig.MAX_CONCURRENT) as ex:
-                ok_count = sum(1 for r in ex.map(one, targets) if r)
+                ok_count = sum(1 for r in ex.map(one, enumerate(targets)) if r)
         finally:
             self.flash_finished.emit(ok_count, len(targets))
 
@@ -1392,6 +1402,236 @@ class MainWindow(QMainWindow):
         self.batch_status.setText(f"done: {ok}/{len(targets)} ok"
                                   + (" (cancelled)" if self._batch_cancel else ""))
         self._log(f"Batch complete: {ok}/{len(targets)} ok.")
+
+    # ---------- Bulk (XLSX) content-programming tab ----------
+    def _build_bulk_tab(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        info = QLabel(
+            "Program full per-badge content (identity image + name/id, text frames, "
+            "image slots) from an XLSX sheet. One ROW per badge, applied in order to "
+            "the CHECKED devices (row 1 → first checked badge). All checked badges are "
+            "connected at once and kept awake (keepalive) so none sleep mid-run. Columns use named "
+            "headers — name, attendee_id, identity_image[/_fmt], text_label_N/text_body_N, "
+            "image_N[/_fmt]. Image cells are file paths (relative to the sheet); _fmt is "
+            "bw or gray2 (default gray2). Blank cells are left unchanged.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#9aa4b2;")
+        v.addWidget(info)
+
+        g = QGroupBox("Bulk program")
+        gl = QGridLayout(g)
+        self.bulk_path = QLineEdit()
+        self.bulk_path.setReadOnly(True)
+        self.bulk_path.setPlaceholderText("no sheet loaded")
+        load_btn = QPushButton("Load XLSX…")
+        load_btn.clicked.connect(self._load_bulk_xlsx)
+        tmpl_btn = QPushButton("Save template…")
+        tmpl_btn.setObjectName("ghost")
+        tmpl_btn.clicked.connect(self._save_bulk_template)
+        self.bulk_run = QPushButton("Run on checked")
+        self.bulk_run.clicked.connect(lambda: self._go(self._run_bulk()))
+        self.bulk_cancel_btn = QPushButton("Cancel")
+        self.bulk_cancel_btn.setObjectName("ghost")
+        self.bulk_cancel_btn.setEnabled(False)
+        self.bulk_cancel_btn.clicked.connect(self._cancel_batch)
+        self.bulk_prog = QProgressBar()
+        self.bulk_status = QLabel("no sheet loaded")
+        self.bulk_status.setStyleSheet("color:#9aa4b2;")
+        gl.addWidget(QLabel("Sheet"), 0, 0)
+        gl.addWidget(self.bulk_path, 0, 1)
+        gl.addWidget(load_btn, 0, 2)
+        gl.addWidget(tmpl_btn, 0, 3)
+        gl.addWidget(self.bulk_run, 1, 1)
+        gl.addWidget(self.bulk_cancel_btn, 1, 2)
+        gl.addWidget(self.bulk_prog, 2, 0, 1, 4)
+        gl.addWidget(self.bulk_status, 3, 0, 1, 4)
+        v.addWidget(g)
+        v.addStretch()
+        return w
+
+    def _load_bulk_xlsx(self) -> None:
+        fn, _ = QFileDialog.getOpenFileName(self, "Bulk content sheet",
+                                            self.bulk_path.text() or "",
+                                            "Excel (*.xlsx)")
+        if not fn:
+            return
+        try:
+            rows, warnings = bulkprog.parse_workbook(fn)
+        except Exception as e:  # noqa: BLE001
+            self._log(f"XLSX parse failed: {e}")
+            self.bulk_status.setText("parse failed (see log)")
+            QMessageBox.critical(self, "Bulk content sheet", str(e))
+            return
+        self._bulk_rows = rows
+        self._img_cache.clear()
+        self.bulk_path.setText(fn)
+        for msg in warnings:
+            self._log(f"XLSX: {msg}")
+        n_txt = sum(len(r.text_frames) for r in rows)
+        n_img = sum(len(r.image_frames) for r in rows)
+        summary = (f"{len(rows)} badge row(s): {n_txt} text frame(s), "
+                   f"{n_img} image slot(s)"
+                   + (f", {len(warnings)} warning(s)" if warnings else ""))
+        self.bulk_status.setText(summary)
+        self._log(f"Loaded {Path(fn).name}: {summary}")
+
+    def _save_bulk_template(self) -> None:
+        fn, _ = QFileDialog.getSaveFileName(self, "Save XLSX template",
+                                            "badge_content_template.xlsx",
+                                            "Excel (*.xlsx)")
+        if not fn:
+            return
+        if not fn.lower().endswith(".xlsx"):
+            fn += ".xlsx"
+        try:
+            bulkprog.make_template(fn)
+        except Exception as e:  # noqa: BLE001
+            self._log(f"template save failed: {e}")
+            return
+        self._log(f"Wrote template: {fn}")
+
+    def _convert(self, path: str, fmt: int) -> bytes:
+        key = (path, fmt)
+        cached = self._img_cache.get(key)
+        if cached is None:
+            cached = (imageconv.to_bw(path) if fmt == keys.FMT_BW
+                      else imageconv.to_gray2(path))
+            self._img_cache[key] = cached
+        return cached
+
+    async def _program_row(self, link: BadgeLink, row: bulkprog.RowSpec) -> None:
+        if row.name is not None or row.attendee_id is not None:
+            anim, r, g, b = row.identity_led or (keys.ANIM_OFF, 0, 0, 0)
+            await link.write_identity_meta(row.name or "", row.attendee_id or "", anim, r, g, b)
+        if row.identity_image:
+            path, fmt = row.identity_image
+            await link.upload_identity_image(self._convert(path, fmt), fmt)
+        for tf in row.text_frames:
+            await link.write_text_frame(tf.idx, tf.anim, tf.r, tf.g, tf.b, tf.label, tf.body)
+        for im in row.image_frames:
+            await link.write_image_frame(im.slot, im.fmt, im.anim, im.r, im.g, im.b,
+                                         self._convert(im.path, im.fmt))
+
+    async def _ka_loop(self, link: BadgeLink, lock: asyncio.Lock) -> None:
+        """Hold a badge's config-mode window open with a 1 Hz keepalive write.
+
+        The lock serializes writes on this link so a keepalive never interleaves
+        with an in-flight chunked upload on the same connection."""
+        while link.connected:
+            try:
+                async with lock:
+                    await link.send_keepalive()
+            except Exception:  # noqa: BLE001
+                break
+            await asyncio.sleep(1.0)
+
+    async def _run_bulk(self) -> None:
+        if self.link.connected:
+            self._log("Disconnect the interactive connection before running a bulk program.")
+            return
+        if not self._bulk_rows:
+            self._log("Load an XLSX sheet first.")
+            return
+        targets = self.model.checked_devices()
+        if not targets:
+            self._log("Check some devices in the table first.")
+            return
+        rows = self._bulk_rows
+        n = min(len(targets), len(rows))
+        if len(targets) != len(rows):
+            self._log(f"Count mismatch: {len(targets)} checked device(s) vs {len(rows)} "
+                      f"row(s) — programming the first {n}.")
+        targets = targets[:n]
+        rows = rows[:n]
+
+        self._batch_cancel = False
+        self._batch_running = True
+        self.bulk_run.setEnabled(False)
+        self.bulk_cancel_btn.setEnabled(True)
+        self.connect_btn.setEnabled(False)
+        self.bulk_prog.setMaximum(n)
+        self.bulk_prog.setValue(0)
+
+        # held connections: address -> (BadgeLink, write-lock, keepalive task)
+        links: dict[str, tuple[BadgeLink, asyncio.Lock, asyncio.Task]] = {}
+        finalized: set[str] = set()   # addresses left in a done/failed state
+        try:
+            # Phase 1: connect to all checked badges at once and keep them awake.
+            self.bulk_status.setText(f"connecting to {n} badge(s) …")
+            self._log(f"Bulk: opening {n} connection(s) to hold badges awake …")
+            try:
+                handles = await scan_all(4.0)   # refresh BLEDevice handles once, up front
+            except Exception as e:  # noqa: BLE001
+                handles = {}
+                self._log(f"Bulk: scan refresh failed ({e}); using last-seen handles.")
+
+            sem = asyncio.Semaphore(6)   # stagger connects so the adapter isn't swamped
+
+            async def _open(d) -> None:
+                async with sem:
+                    if self._batch_cancel:
+                        return
+                    self.model.set_status(d.address, "connecting")
+                    fresh = handles.get(d.address)
+                    found = fresh or Found(name=d.name, address=d.address,
+                                           is_proxy=d.is_proxy, device=d.device)
+                    link = BadgeLink()
+                    try:
+                        await link.connect(found, rescan=False)
+                    except Exception as e:  # noqa: BLE001
+                        self.model.set_status(d.address, "failed")
+                        self._log(f"bulk connect {d.name}: {e}")
+                        return
+                    lock = asyncio.Lock()
+                    task = asyncio.ensure_future(self._ka_loop(link, lock))
+                    links[d.address] = (link, lock, task)
+                    self.model.set_status(d.address, "connected")
+
+            await asyncio.gather(*(_open(d) for d in targets))
+            self._log(f"Bulk: {len(links)}/{n} connected; programming …")
+
+            # Phase 2: program each badge over its held link (others stay kept-alive).
+            done = ok = 0
+            for d, row in zip(targets, rows):
+                if self._batch_cancel:
+                    break
+                entry = links.get(d.address)
+                if entry is None:
+                    done += 1
+                    self.bulk_prog.setValue(done)
+                    continue   # never connected — already marked failed
+                link, lock, _task = entry
+                self.bulk_status.setText(f"{d.name}: programming row {row.row_no} …")
+                self.model.set_status(d.address, "working")
+                try:
+                    async with lock:
+                        await self._program_row(link, row)
+                    self.model.set_status(d.address, "done")
+                    ok += 1
+                except Exception as e:  # noqa: BLE001
+                    self.model.set_status(d.address, "failed")
+                    self._log(f"bulk {d.address} (row {row.row_no}): {e}")
+                finalized.add(d.address)
+                done += 1
+                self.bulk_prog.setValue(done)
+
+            self.bulk_status.setText(f"done: {ok}/{n} ok"
+                                     + (" (cancelled)" if self._batch_cancel else ""))
+            self._log(f"Bulk program complete: {ok}/{n} ok.")
+        finally:
+            # Phase 3: tear down every held connection (badges sleep after disconnect).
+            for _addr, (link, _lock, task) in links.items():
+                task.cancel()
+            await asyncio.gather(*(link.disconnect() for link, _l, _t in links.values()),
+                                 return_exceptions=True)
+            for addr in links:
+                if addr not in finalized:
+                    self.model.set_status(addr, "idle")
+            self._batch_running = False
+            self.bulk_run.setEnabled(True)
+            self.bulk_cancel_btn.setEnabled(False)
+            self._on_row_selected()
 
     # ---------- "Current data" (read-back) tab ----------
     @property

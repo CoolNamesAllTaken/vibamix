@@ -10,7 +10,9 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <zephyr/app_version.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/sys/util.h>
 
 // With ROTATE_270 the drawing surface is EPD_HEIGHT wide x EPD_WIDTH tall.
 static constexpr int kCanvasW = EPD_HEIGHT; // 264
@@ -22,6 +24,11 @@ static constexpr int kQrBox  = 120;  // left column width reserved for the QR
 // Pin the QR version so the encode buffers stay tiny (our URL fits well within
 // v5). NEVER use qrcodegen_BUFFER_LEN_MAX (v40 = ~3.9 KB) — it would blow the stack.
 static constexpr int kQrMaxVersion = 5;
+
+// Running firmware identifier: the app repo git short hash, captured by Zephyr at
+// build time (git describe --always --abbrev=12, with a -dirty suffix on a dirty
+// tree). Shown on the config screen so the flashed/OTA'd build is visible on-device.
+static const char *const kFwVersion = "fw " STRINGIFY(APP_BUILD_VERSION);
 static uint8_t s_qr[qrcodegen_BUFFER_LEN_FOR_VERSION(kQrMaxVersion)];
 static uint8_t s_qr_tmp[qrcodegen_BUFFER_LEN_FOR_VERSION(kQrMaxVersion)];
 
@@ -249,6 +256,9 @@ void qr_screen_draw(GUI &gui, const char *code, const char *url,
     char idline[24];
     snprintf(idline, sizeof(idline), "Badge ID: %s", code ? code : "");
     Paint_DrawString_P(rx, ry + 8, idline, &PoppinsMd16, WHITE, BLACK);
+
+    // Firmware git hash, small/unobtrusive under the badge id (diagnostic).
+    Paint_DrawString_EN(rx, ry + 8 + 20, kFwVersion, &Font8, WHITE, BLACK);
 
     // Bottom bar: an inverted strip with the exit instruction, consistent with the
     // Connected / Mesh Gateway config screens.

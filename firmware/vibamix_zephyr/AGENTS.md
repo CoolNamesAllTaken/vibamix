@@ -247,7 +247,7 @@ badge from a phone. The badge normally sleeps in **System OFF** ~5 s after each 
   below its need). Image/screen renders triggered from a BT-thread callback are **deferred to the main
   loop** (lock-free ping-pong buffers) so the ~2 s ePaper refresh never blocks the BT thread and drops
   the connection.
-- **Window/exit** ([ConfigMode.cpp](src/ConfigMode.cpp)): stays awake 180 s, reset on any
+- **Window/exit** ([ConfigMode.cpp](src/ConfigMode.cpp)): stays awake 600 s, reset on any
   connection/write activity. Config mode exits on a **second button press** *or* on a **GATT
   disconnect** after having been connected; on exit it tears down cleanly (LEDs off, stop the
   advertiser, disconnect any link), then `main()` restores the home identity frame and runs the
