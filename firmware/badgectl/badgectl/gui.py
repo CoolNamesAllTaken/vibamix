@@ -11,7 +11,15 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PyQt6.QtCore import QSortFilterProxyModel, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon, QImage, QKeySequence, QPixmap, QShortcut
+from PyQt6.QtGui import (
+    QColor,
+    QGuiApplication,
+    QIcon,
+    QImage,
+    QKeySequence,
+    QPixmap,
+    QShortcut,
+)
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -19,6 +27,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -26,9 +35,12 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
+    QSlider,
     QSpinBox,
     QSplitter,
     QTableView,
@@ -41,11 +53,17 @@ from PyQt6.QtWidgets import (
 
 from bleak.exc import BleakDeviceNotFoundError
 
-from . import flash, flashconfig, imageconv, keys, probes, serialreg
-from .ble import BadgeLink, Found, Scanner
+from . import bulkprog, flash, flashconfig, imageconv, keys, probes, serialreg
+from .ble import BadgeLink, Found, Scanner, scan_all
 from .devices import COL_CHECK, COL_NAME, DeviceModel
 from .mesh import MeshCrypto, MeshSession
 from .seqstore import SeqStore
+
+# Bulk (XLSX) programming connects through a small pool of workers; each worker
+# connects to one badge, programs it, disconnects, then moves to the next. This
+# caps simultaneous BLE links (macOS/CoreBluetooth is unreliable with many at
+# once) instead of holding every checked badge open at the same time.
+BULK_WORKERS = 5
 
 STYLE = """
 QWidget { font-size: 13px; }
@@ -77,6 +95,7 @@ QHeaderView::section { background: #20242c; border: none; padding: 4px; color: #
 """
 
 KA_FRESH_S = 5.0  # link considered alive if any badge activity seen within this many seconds
+STALE_PRUNE_S = 60.0  # drop scanned badges unheard for this long
 
 
 def pil_to_pixmap(pil_img) -> QPixmap:
@@ -91,12 +110,18 @@ class MainWindow(QMainWindow):
     flash_progress = pyqtSignal(str, float, str)   # probe label, percent, phase
     flash_result = pyqtSignal(str, bool, str)      # probe label, ok, message
     flash_finished = pyqtSignal(int, int)          # ok count, total
+    reset_finished = pyqtSignal(int, int)          # ok count, total (probe-rs reset)
 
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("badgectl — vibamix")
         self.setWindowIcon(QIcon(str(Path(__file__).parent / "assets" / "icon.png")))
-        self.resize(1280, 800)
+        # Fit the host laptop's *available* display (excludes menu bar / dock /
+        # taskbar) so the window never opens taller than a short screen, while
+        # keeping the roomy default on large monitors.
+        avail = QGuiApplication.primaryScreen().availableGeometry()
+        self.setMinimumSize(min(800, avail.width()), min(480, avail.height()))
+        self.resize(min(1280, avail.width()), min(800, avail.height()))
         self.setStyleSheet(STYLE)
 
         self.link = BadgeLink()
@@ -121,6 +146,10 @@ class MainWindow(QMainWindow):
         self._last_link = 0.0   # last successful GATT round-trip (any direction) — link health
         self._batch_running = False
         self._batch_cancel = False
+
+        # bulk (XLSX) content-programming state
+        self._bulk_rows: list[bulkprog.RowSpec] = []
+        self._img_cache: dict[tuple[str, int], bytes] = {}
 
         # flash (SWD bulk-flash) state
         self._flash_running = False
@@ -261,15 +290,27 @@ class MainWindow(QMainWindow):
         self.forget_btn.setEnabled(d is not None)
 
     # ---------- action pane (right) ----------
+    def _scrollable(self, w: QWidget) -> QScrollArea:
+        """Wrap a tab's content so it scrolls internally instead of clipping on
+        short screens. With setWidgetResizable the content keeps its top-aligned
+        full-height look and only grows a scrollbar when the pane is too short."""
+        sa = QScrollArea()
+        sa.setWidgetResizable(True)
+        sa.setFrameShape(QFrame.Shape.NoFrame)
+        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        sa.setWidget(w)
+        return sa
+
     def _build_action_pane(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
         v.addWidget(self._build_conn_header())
         tabs = QTabWidget()
         tabs.addTab(self._build_gatt_tab(), "Direct (GATT)")
-        tabs.addTab(self._build_mesh_tab(), "Mesh")
-        tabs.addTab(self._build_batch_tab(), "Batch")
-        tabs.addTab(self._build_flash_tab(), "Flash")
+        tabs.addTab(self._scrollable(self._build_mesh_tab()), "Mesh")
+        tabs.addTab(self._scrollable(self._build_batch_tab()), "Batch")
+        tabs.addTab(self._scrollable(self._build_bulk_tab()), "Bulk (XLSX)")
+        tabs.addTab(self._scrollable(self._build_flash_tab()), "Flash")
         v.addWidget(tabs, 1)
         return w
 
@@ -339,6 +380,10 @@ class MainWindow(QMainWindow):
 
     def _tick_ui(self) -> None:
         self.model.refresh_ages()
+        if self.scanner.running:
+            protect = {self._active} if self._active else set()
+            if self.model.prune_stale(STALE_PRUNE_S, protect):
+                self.count_lbl.setText(f"{self.model.rowCount()} devices")
         if self._active and self.link.connected:
             now = time.monotonic()
             rx_age = now - self._last_rx                          # true notify age (label)
@@ -429,10 +474,10 @@ class MainWindow(QMainWindow):
     def _build_gatt_tab(self) -> QWidget:
         self._gatt_actions = []
         inner = QTabWidget()
-        inner.addTab(self._build_id_subtab(), "Identity")
-        inner.addTab(self._build_text_subtab(), "Text frames")
-        inner.addTab(self._build_image_subtab(), "Image frames")
-        inner.addTab(self._build_fw_subtab(), "Firmware")
+        inner.addTab(self._scrollable(self._build_id_subtab()), "Identity")
+        inner.addTab(self._scrollable(self._build_text_subtab()), "Text frames")
+        inner.addTab(self._scrollable(self._build_image_subtab()), "Image frames")
+        inner.addTab(self._scrollable(self._build_fw_subtab()), "Firmware")
         return inner
 
     # -- shared per-frame LED + display helpers (state keyed by `which`) --
@@ -858,6 +903,20 @@ class MainWindow(QMainWindow):
         info.setStyleSheet("color:#9aa4b2;")
         v.addWidget(info)
 
+        # PARTY MODE: one-click rainbow-sparkle @ full brightness on the whole fleet.
+        # Toggles: a second click releases brightness control and sends every badge
+        # back to its identity frame. The button pulses a scrolling rainbow while on.
+        self._party_on = False
+        self._party_phase = 0.0
+        self._party_timer = QTimer(self)
+        self._party_timer.timeout.connect(self._party_pulse)
+        self.party_btn = QPushButton("🦄  PARTY MODE  🌈")
+        self.party_btn.setObjectName("party")
+        self.party_btn.setMinimumHeight(48)
+        self.party_btn.setStyleSheet(self._party_style(0.0))
+        self.party_btn.clicked.connect(self._toggle_party)
+        v.addWidget(self.party_btn)
+
         g = QGroupBox("Event heartbeat (mesh — keep badges awake)")
         gl = QHBoxLayout(g)
         self.m_event = QLineEdit()
@@ -900,6 +959,51 @@ class MainWindow(QMainWindow):
         gl.addWidget(self.m_anim)
         gl.addStretch()
         gl.addWidget(cb)
+        v.addWidget(g)
+
+        # Brightness override: pin LED brightness on every badge, overriding the
+        # ambient-light auto-adjust. Lasts for the current LED state only — the next
+        # animation/color/frame change resumes auto-brightness.
+        g = QGroupBox("Brightness — override all badges (current LED state only)")
+        gl = QHBoxLayout(g)
+        self.m_bright = QSlider(Qt.Orientation.Horizontal)
+        self.m_bright.setRange(0, 255)
+        self.m_bright.setValue(255)
+        self.m_bright_val = QLabel("255")
+        self.m_bright.valueChanged.connect(
+            lambda v: self.m_bright_val.setText(str(v)))
+        bb = QPushButton("Send Brightness")
+        bb.clicked.connect(lambda: self._go(self._mesh_send(
+            keys.OP_SET_BRIGHTNESS, bytes([self.m_bright.value()]))))
+        # Hand brightness back to each badge's ambient-light auto-adjust without
+        # changing the running animation/color.
+        rb = QPushButton("Release (auto)")
+        rb.setObjectName("ghost")
+        rb.clicked.connect(lambda: self._go(self._mesh_send(
+            keys.OP_RELEASE_BRIGHTNESS, b"")))
+        gl.addWidget(QLabel("Level"))
+        gl.addWidget(self.m_bright)
+        gl.addWidget(self.m_bright_val)
+        gl.addWidget(bb)
+        gl.addWidget(rb)
+        v.addWidget(g)
+
+        # Config mode: remotely enter/exit config mode (QR onboarding screen +
+        # connectable advertiser). Best-effort — only reaches badges that are
+        # currently awake (a sleeping badge's radio is off; press its button).
+        g = QGroupBox("Config mode — toggle on all awake badges")
+        gl = QHBoxLayout(g)
+        cm_on = QPushButton("Enter config mode")
+        cm_on.clicked.connect(lambda: self._go(self._mesh_send(
+            keys.OP_SET_CONFIG_MODE, bytes([1]))))
+        cm_off = QPushButton("Exit config mode")
+        cm_off.setObjectName("ghost")
+        cm_off.clicked.connect(lambda: self._go(self._mesh_send(
+            keys.OP_SET_CONFIG_MODE, bytes([0]))))
+        gl.addWidget(QLabel("Awake badges only"))
+        gl.addStretch()
+        gl.addWidget(cm_on)
+        gl.addWidget(cm_off)
         v.addWidget(g)
 
         # Show text: draw a text frame straight to every badge's panel. Not stored
@@ -1002,7 +1106,9 @@ class MainWindow(QMainWindow):
             "SWD (probe-rs), in parallel. Build the images first with "
             "vibamix_zephyr/scripts/build_slots.sh — the app must be the trailered "
             "slotA.bin so the bootloader's CRC check passes and the board boots "
-            "standalone. Independent of the BLE connection above.")
+            "standalone. Independent of the BLE connection above. Or use Reset all "
+            "to soft-reboot every attached board (probe-rs reset) without reflashing "
+            "— stored content is preserved.")
         info.setWordWrap(True)
         info.setStyleSheet("color:#9aa4b2;")
         v.addWidget(info)
@@ -1021,6 +1127,9 @@ class MainWindow(QMainWindow):
             lambda: self._browse_into(self.fl_app_path, "App slotA.bin", "BIN (*.bin)"))
         self.fl_factory = QCheckBox("Write per-unit factory id (mesh unicast / config code)")
         self.fl_factory.setChecked(True)
+        self.fl_erase = QCheckBox(
+            "Full chip erase first (factory-clean — wipes mesh provisioning / stored content)")
+        self.fl_erase.setChecked(False)
         gl.addWidget(QLabel("Bootloader (.hex → 0x0)"), 0, 0)
         gl.addWidget(self.fl_bl_path, 0, 1)
         gl.addWidget(bl_browse, 0, 2)
@@ -1028,6 +1137,7 @@ class MainWindow(QMainWindow):
         gl.addWidget(self.fl_app_path, 1, 1)
         gl.addWidget(app_browse, 1, 2)
         gl.addWidget(self.fl_factory, 2, 0, 1, 3)
+        gl.addWidget(self.fl_erase, 3, 0, 1, 3)
         v.addWidget(g)
 
         self.fl_table = QTableWidget(0, 3)
@@ -1043,16 +1153,21 @@ class MainWindow(QMainWindow):
         self.fl_refresh = QPushButton("Refresh probes")
         self.fl_refresh.setObjectName("ghost")
         self.fl_refresh.clicked.connect(self._refresh_probes)
+        self.fl_reset = QPushButton("Reset all")
+        self.fl_reset.setObjectName("ghost")
+        self.fl_reset.clicked.connect(self._reset_all)
         self.fl_flash = QPushButton("Flash all")
         self.fl_flash.clicked.connect(self._flash_all)
         row.addWidget(self.fl_refresh)
         row.addStretch()
+        row.addWidget(self.fl_reset)
         row.addWidget(self.fl_flash)
         v.addLayout(row)
 
         self.flash_progress.connect(self._on_flash_progress)
         self.flash_result.connect(self._on_flash_result)
         self.flash_finished.connect(self._on_flash_finished)
+        self.reset_finished.connect(self._on_reset_finished)
 
         self._fl_timer = QTimer(self)   # poll for plugged/unplugged probes
         self._fl_timer.setInterval(2_000)
@@ -1117,23 +1232,31 @@ class MainWindow(QMainWindow):
             flash.Image(app, "bin", "app", flashconfig.APP_SLOT_A_ADDR),
         ]
         want_factory = self.fl_factory.isChecked()
+        want_erase = self.fl_erase.isChecked()
 
         self._flash_running = True
         self._fl_timer.stop()
         self.fl_flash.setEnabled(False)
+        self.fl_reset.setEnabled(False)
         self.fl_refresh.setEnabled(False)
         for p in targets:
             self._set_probe_status(p.label, "queued")
         self._log(f"Flashing {len(targets)} probe(s) … "
-                  f"factory id {'ON' if want_factory else 'off'}.")
+                  f"factory id {'ON' if want_factory else 'off'}, "
+                  f"erase {'ON' if want_erase else 'off'}.")
 
         t = threading.Thread(
-            target=self._flash_worker, args=(targets, images, want_factory), daemon=True)
+            target=self._flash_worker, args=(targets, images, want_factory, want_erase),
+            daemon=True)
         t.start()
 
-    def _flash_worker(self, targets, images, want_factory: bool) -> None:
+    def _flash_worker(self, targets, images, want_factory: bool, want_erase: bool) -> None:
         """Runs off the Qt thread: one probe-rs flash per probe, bounded pool."""
-        def one(p: probes.Probe) -> bool:
+        def one(item: tuple[int, probes.Probe]) -> bool:
+            idx, p = item
+            # Ramp the starts so 20 probes don't attach to the hub at the same
+            # instant (the contention that produces transient probe-rs failures).
+            time.sleep(idx * flashconfig.STAGGER_STEP_S)
             try:
                 fid = serialreg.assign_for(p.serial) if want_factory else None
             except RuntimeError as e:
@@ -1142,7 +1265,7 @@ class MainWindow(QMainWindow):
             ok, msg = flash.flash_device(
                 p.selector, images,
                 lambda pct, phase: self.flash_progress.emit(p.label, pct, phase),
-                fid)
+                fid, erase=want_erase)
             detail = msg if not ok else (f"id 0x{fid:04x}" if fid is not None else "ok")
             self.flash_result.emit(p.label, ok, detail)
             return ok
@@ -1150,7 +1273,7 @@ class MainWindow(QMainWindow):
         ok_count = 0
         try:
             with ThreadPoolExecutor(max_workers=flashconfig.MAX_CONCURRENT) as ex:
-                ok_count = sum(1 for r in ex.map(one, targets) if r)
+                ok_count = sum(1 for r in ex.map(one, enumerate(targets)) if r)
         finally:
             self.flash_finished.emit(ok_count, len(targets))
 
@@ -1165,8 +1288,52 @@ class MainWindow(QMainWindow):
         self._flash_running = False
         self.fl_refresh.setEnabled(True)
         self.fl_flash.setEnabled(True)
+        self.fl_reset.setEnabled(True)
         self._fl_timer.start()
         self._log(f"Flash complete: {ok}/{total} ok.")
+
+    def _reset_all(self) -> None:
+        """Soft-reset every attached probe (probe-rs reset) — no reflash."""
+        if self._flash_running:
+            return
+        targets = list(self._fl_probes)
+        if not targets:
+            self._log("Reset: no probes detected.")
+            return
+        self._flash_running = True   # shared busy flag: flash/reset can't overlap
+        self._fl_timer.stop()
+        self.fl_flash.setEnabled(False)
+        self.fl_reset.setEnabled(False)
+        self.fl_refresh.setEnabled(False)
+        for p in targets:
+            self._set_probe_status(p.label, "queued")
+        self._log(f"Resetting {len(targets)} probe(s) …")
+
+        t = threading.Thread(target=self._reset_worker, args=(targets,), daemon=True)
+        t.start()
+
+    def _reset_worker(self, targets) -> None:
+        """Runs off the Qt thread: one probe-rs reset per probe, bounded pool."""
+        def one(p: probes.Probe) -> bool:
+            self.flash_progress.emit(p.label, 0.0, "resetting")
+            ok, msg = flash.reset_device(p.selector)
+            self.flash_result.emit(p.label, ok, msg)
+            return ok
+
+        ok_count = 0
+        try:
+            with ThreadPoolExecutor(max_workers=flashconfig.MAX_CONCURRENT) as ex:
+                ok_count = sum(1 for r in ex.map(one, targets) if r)
+        finally:
+            self.reset_finished.emit(ok_count, len(targets))
+
+    def _on_reset_finished(self, ok: int, total: int) -> None:
+        self._flash_running = False
+        self.fl_refresh.setEnabled(True)
+        self.fl_flash.setEnabled(True)
+        self.fl_reset.setEnabled(True)
+        self._fl_timer.start()
+        self._log(f"Reset complete: {ok}/{total} ok.")
 
     def _cancel_batch(self) -> None:
         self._batch_cancel = True
@@ -1242,6 +1409,214 @@ class MainWindow(QMainWindow):
                                   + (" (cancelled)" if self._batch_cancel else ""))
         self._log(f"Batch complete: {ok}/{len(targets)} ok.")
 
+    # ---------- Bulk (XLSX) content-programming tab ----------
+    def _build_bulk_tab(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        info = QLabel(
+            "Program full per-badge content (identity image + name/id, text frames, "
+            "image slots) from an XLSX sheet. One ROW per badge, applied in order to "
+            "the CHECKED devices (row 1 → first checked badge). All checked badges are "
+            "connected at once and kept awake (keepalive) so none sleep mid-run. Columns use named "
+            "headers — name, attendee_id, identity_image[/_fmt], text_label_N/text_body_N, "
+            "image_N[/_fmt]. Image cells are file paths (relative to the sheet); _fmt is "
+            "bw or gray2 (default gray2). Blank cells are left unchanged.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#9aa4b2;")
+        v.addWidget(info)
+
+        g = QGroupBox("Bulk program")
+        gl = QGridLayout(g)
+        self.bulk_path = QLineEdit()
+        self.bulk_path.setReadOnly(True)
+        self.bulk_path.setPlaceholderText("no sheet loaded")
+        load_btn = QPushButton("Load XLSX…")
+        load_btn.clicked.connect(self._load_bulk_xlsx)
+        tmpl_btn = QPushButton("Save template…")
+        tmpl_btn.setObjectName("ghost")
+        tmpl_btn.clicked.connect(self._save_bulk_template)
+        self.bulk_run = QPushButton("Run on checked")
+        self.bulk_run.clicked.connect(lambda: self._go(self._run_bulk()))
+        self.bulk_cancel_btn = QPushButton("Cancel")
+        self.bulk_cancel_btn.setObjectName("ghost")
+        self.bulk_cancel_btn.setEnabled(False)
+        self.bulk_cancel_btn.clicked.connect(self._cancel_batch)
+        self.bulk_prog = QProgressBar()
+        self.bulk_status = QLabel("no sheet loaded")
+        self.bulk_status.setStyleSheet("color:#9aa4b2;")
+        gl.addWidget(QLabel("Sheet"), 0, 0)
+        gl.addWidget(self.bulk_path, 0, 1)
+        gl.addWidget(load_btn, 0, 2)
+        gl.addWidget(tmpl_btn, 0, 3)
+        gl.addWidget(self.bulk_run, 1, 1)
+        gl.addWidget(self.bulk_cancel_btn, 1, 2)
+        gl.addWidget(self.bulk_prog, 2, 0, 1, 4)
+        gl.addWidget(self.bulk_status, 3, 0, 1, 4)
+        v.addWidget(g)
+        v.addStretch()
+        return w
+
+    def _load_bulk_xlsx(self) -> None:
+        fn, _ = QFileDialog.getOpenFileName(self, "Bulk content sheet",
+                                            self.bulk_path.text() or "",
+                                            "Excel (*.xlsx)")
+        if not fn:
+            return
+        try:
+            rows, warnings = bulkprog.parse_workbook(fn)
+        except Exception as e:  # noqa: BLE001
+            self._log(f"XLSX parse failed: {e}")
+            self.bulk_status.setText("parse failed (see log)")
+            QMessageBox.critical(self, "Bulk content sheet", str(e))
+            return
+        self._bulk_rows = rows
+        self._img_cache.clear()
+        self.bulk_path.setText(fn)
+        for msg in warnings:
+            self._log(f"XLSX: {msg}")
+        n_txt = sum(len(r.text_frames) for r in rows)
+        n_img = sum(len(r.image_frames) for r in rows)
+        summary = (f"{len(rows)} badge row(s): {n_txt} text frame(s), "
+                   f"{n_img} image slot(s)"
+                   + (f", {len(warnings)} warning(s)" if warnings else ""))
+        self.bulk_status.setText(summary)
+        self._log(f"Loaded {Path(fn).name}: {summary}")
+
+    def _save_bulk_template(self) -> None:
+        fn, _ = QFileDialog.getSaveFileName(self, "Save XLSX template",
+                                            "badge_content_template.xlsx",
+                                            "Excel (*.xlsx)")
+        if not fn:
+            return
+        if not fn.lower().endswith(".xlsx"):
+            fn += ".xlsx"
+        try:
+            bulkprog.make_template(fn)
+        except Exception as e:  # noqa: BLE001
+            self._log(f"template save failed: {e}")
+            return
+        self._log(f"Wrote template: {fn}")
+
+    def _convert(self, path: str, fmt: int) -> bytes:
+        key = (path, fmt)
+        cached = self._img_cache.get(key)
+        if cached is None:
+            cached = (imageconv.to_bw(path) if fmt == keys.FMT_BW
+                      else imageconv.to_gray2(path))
+            self._img_cache[key] = cached
+        return cached
+
+    async def _program_row(self, link: BadgeLink, row: bulkprog.RowSpec) -> None:
+        if row.name is not None or row.attendee_id is not None:
+            anim, r, g, b = row.identity_led or (keys.ANIM_OFF, 0, 0, 0)
+            await link.write_identity_meta(row.name or "", row.attendee_id or "", anim, r, g, b)
+        if row.identity_image:
+            path, fmt = row.identity_image
+            await link.upload_identity_image(self._convert(path, fmt), fmt)
+        for tf in row.text_frames:
+            await link.write_text_frame(tf.idx, tf.anim, tf.r, tf.g, tf.b, tf.label, tf.body)
+        for im in row.image_frames:
+            await link.write_image_frame(im.slot, im.fmt, im.anim, im.r, im.g, im.b,
+                                         self._convert(im.path, im.fmt))
+
+    async def _run_bulk(self) -> None:
+        if self.link.connected:
+            self._log("Disconnect the interactive connection before running a bulk program.")
+            return
+        if not self._bulk_rows:
+            self._log("Load an XLSX sheet first.")
+            return
+        targets = self.model.checked_devices()
+        if not targets:
+            self._log("Check some devices in the table first.")
+            return
+        rows = self._bulk_rows
+        n = min(len(targets), len(rows))
+        if len(targets) != len(rows):
+            self._log(f"Count mismatch: {len(targets)} checked device(s) vs {len(rows)} "
+                      f"row(s) — programming the first {n}.")
+        targets = targets[:n]
+        rows = rows[:n]
+
+        self._batch_cancel = False
+        self._batch_running = True
+        self.bulk_run.setEnabled(False)
+        self.bulk_cancel_btn.setEnabled(True)
+        self.connect_btn.setEnabled(False)
+        self.bulk_prog.setMaximum(n)
+        self.bulk_prog.setValue(0)
+
+        # Refresh BLEDevice handles once, up front: a worker connects with
+        # rescan=False (one BleakScanner per connect is unreliable on macOS).
+        try:
+            handles = await scan_all(4.0)
+        except Exception as e:  # noqa: BLE001
+            handles = {}
+            self._log(f"Bulk: scan refresh failed ({e}); using last-seen handles.")
+
+        # Each worker pulls (device, row) pairs off this queue, programming one
+        # badge at a time over its own short-lived connection.
+        work: asyncio.Queue = asyncio.Queue()
+        for d, row in zip(targets, rows):
+            work.put_nowait((d, row))
+
+        # All of this runs in one asyncio loop, so the counters need no locking.
+        done = ok = 0
+
+        async def _program_one(d, row) -> bool:
+            nonlocal done
+            self.model.set_status(d.address, "connecting")
+            fresh = handles.get(d.address)
+            found = fresh or Found(name=d.name, address=d.address,
+                                   is_proxy=d.is_proxy, device=d.device)
+            link = BadgeLink()
+            try:
+                await link.connect(found, rescan=False)
+            except Exception as e:  # noqa: BLE001
+                self.model.set_status(d.address, "failed")
+                self._log(f"bulk connect {d.name}: {e}")
+                return False
+            try:
+                self.bulk_status.setText(f"{d.name}: programming row {row.row_no} …")
+                self.model.set_status(d.address, "working")
+                await self._program_row(link, row)
+                self.model.set_status(d.address, "done")
+                return True
+            except Exception as e:  # noqa: BLE001
+                self.model.set_status(d.address, "failed")
+                self._log(f"bulk {d.address} (row {row.row_no}): {e}")
+                return False
+            finally:
+                # Disconnect so the badge is released and sleeps promptly.
+                await link.disconnect()
+
+        async def _worker() -> None:
+            nonlocal done, ok
+            while not self._batch_cancel:
+                try:
+                    d, row = work.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                succeeded = await _program_one(d, row)
+                ok += 1 if succeeded else 0
+                done += 1
+                self.bulk_prog.setValue(done)
+
+        try:
+            self.bulk_status.setText(f"programming {n} badge(s), "
+                                     f"{BULK_WORKERS} at a time …")
+            self._log(f"Bulk: programming {n} badge(s) with {BULK_WORKERS} workers …")
+            await asyncio.gather(*(_worker() for _ in range(BULK_WORKERS)))
+
+            self.bulk_status.setText(f"done: {ok}/{n} ok"
+                                     + (" (cancelled)" if self._batch_cancel else ""))
+            self._log(f"Bulk program complete: {ok}/{n} ok.")
+        finally:
+            self._batch_running = False
+            self.bulk_run.setEnabled(True)
+            self.bulk_cancel_btn.setEnabled(False)
+            self._on_row_selected()
+
     # ---------- "Current data" (read-back) tab ----------
     @property
     def _action_widgets(self):
@@ -1275,6 +1650,54 @@ class MainWindow(QMainWindow):
         await self.link.mesh_tx(keys.vendor_opcode(op) + params)
         self._last_link = time.monotonic()  # a completed acked write proves the link is up
         self._log(f"mesh op 0x{op:02x} broadcast ({len(params)}B params)")
+
+    # ---------- PARTY MODE 🦄🌈 ----------
+    def _party_style(self, phase: float) -> str:
+        # A scrolling rainbow gradient for the button background. `phase` (0..1)
+        # offsets the hue of every stop, so animating it makes the rainbow flow.
+        n = 6
+        stops = []
+        for i in range(n + 1):
+            hue = (phase + i / n) % 1.0
+            c = QColor.fromHsvF(hue, 0.85, 1.0)
+            stops.append(f"stop:{i / n:.3f} {c.name()}")
+        grad = "qlineargradient(x1:0, y1:0, x2:1, y2:0, " + ", ".join(stops) + ")"
+        return (
+            f"QPushButton#party {{ background: {grad}; color: white; "
+            "font-size: 18px; font-weight: 800; border: none; border-radius: 10px; "
+            "padding: 10px; }"
+        )
+
+    def _party_pulse(self) -> None:
+        self._party_phase = (self._party_phase + 0.02) % 1.0
+        self.party_btn.setStyleSheet(self._party_style(self._party_phase))
+
+    def _toggle_party(self) -> None:
+        self._party_on = not self._party_on
+        if self._party_on:
+            self.party_btn.setText("🎉  PARTY MODE: ON — click to stop  🎉")
+            self._party_timer.start(60)   # ~17 fps rainbow scroll
+            self._go(self._party_start())
+        else:
+            self._party_timer.stop()
+            self.party_btn.setText("🦄  PARTY MODE  🌈")
+            self.party_btn.setStyleSheet(self._party_style(0.0))
+            self._go(self._party_stop())
+
+    async def _party_start(self) -> None:
+        # Rainbow sparkle on every badge, pinned to full brightness. The pattern
+        # ignores the color bytes, so they're arbitrary here.
+        await self._mesh_send(keys.OP_SET_LED,
+                              bytes([keys.ANIM_RAINBOW_SPARKLE, 255, 255, 255]))
+        await self._mesh_send(keys.OP_SET_BRIGHTNESS, bytes([255]))
+        self._log("PARTY MODE ON — rainbow sparkle @ full brightness on all badges 🎉")
+
+    async def _party_stop(self) -> None:
+        # Hand brightness back to ambient auto-adjust and send every badge home.
+        await self._mesh_send(keys.OP_RELEASE_BRIGHTNESS, b"")
+        await self._mesh_send(keys.OP_DISPLAY,
+                              bytes([keys.DISP_KIND_IDENTITY, 0]))
+        self._log("PARTY MODE OFF — brightness released, badges back to identity.")
 
     async def _send_heartbeat(self) -> None:
         # Carry the event name (≤8 bytes keeps the access payload unsegmented, so

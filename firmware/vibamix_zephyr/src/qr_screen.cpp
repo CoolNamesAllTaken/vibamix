@@ -10,7 +10,9 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <zephyr/app_version.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/sys/util.h>
 
 // With ROTATE_270 the drawing surface is EPD_HEIGHT wide x EPD_WIDTH tall.
 static constexpr int kCanvasW = EPD_HEIGHT; // 264
@@ -22,6 +24,11 @@ static constexpr int kQrBox  = 120;  // left column width reserved for the QR
 // Pin the QR version so the encode buffers stay tiny (our URL fits well within
 // v5). NEVER use qrcodegen_BUFFER_LEN_MAX (v40 = ~3.9 KB) — it would blow the stack.
 static constexpr int kQrMaxVersion = 5;
+
+// Running firmware identifier: the app repo git short hash, captured by Zephyr at
+// build time (git describe --always --abbrev=12, with a -dirty suffix on a dirty
+// tree). Shown on the config screen so the flashed/OTA'd build is visible on-device.
+static const char *const kFwVersion = "fw " STRINGIFY(APP_BUILD_VERSION);
 static uint8_t s_qr[qrcodegen_BUFFER_LEN_FOR_VERSION(kQrMaxVersion)];
 static uint8_t s_qr_tmp[qrcodegen_BUFFER_LEN_FOR_VERSION(kQrMaxVersion)];
 
@@ -66,9 +73,25 @@ static int draw_battery_icon(int x, int y, int pct)
     return x + bw + 4;
 }
 
-// Top status bar: battery icon + percent (left), countdown M:SS (right), then a
-// progress bar that shrinks from full toward empty as remaining/total falls.
-static void draw_status_bar(int batt_mv, int batt_pct, int remaining_sec, int total_sec)
+// Ambient-light readout: "NNN lx" (or "-- lx" when unknown), centered on the top
+// status row in the same style as the battery text, so it sits between the
+// left-aligned battery and the right-aligned countdown / keepalive dot.
+static void draw_lux_label(int lux)
+{
+    char buf[16];
+    if (lux >= 0) {
+        snprintf(buf, sizeof(buf), "%d lx", lux);
+    } else {
+        snprintf(buf, sizeof(buf), "-- lx");
+    }
+    const int w = Paint_StringWidth_P(buf, &PoppinsMd16);
+    Paint_DrawString_P((kCanvasW - w) / 2, 1, buf, &PoppinsMd16, WHITE, BLACK);
+}
+
+// Top status bar: battery icon + percent (left), lux (center), countdown M:SS
+// (right), then a progress bar that shrinks from full toward empty as remaining/total falls.
+static void draw_status_bar(int batt_mv, int batt_pct, int remaining_sec, int total_sec,
+                            int lux)
 {
     char buf[20];
 
@@ -81,6 +104,9 @@ static void draw_status_bar(int batt_mv, int batt_pct, int remaining_sec, int to
         snprintf(buf, sizeof(buf), "-- %%");
     }
     Paint_DrawString_P(icon_end + 3, 1, buf, &PoppinsMd16, WHITE, BLACK);
+
+    // Lux (center).
+    draw_lux_label(lux);
 
     // Countdown (right-aligned).
     if (remaining_sec < 0) {
@@ -173,14 +199,19 @@ static int draw_wrapped(int x, int y, int maxW, const char *text, pFONT *font)
 }
 
 void qr_screen_draw(GUI &gui, const char *code, const char *url,
-                    int batt_mv, int batt_pct, int remaining_sec, int total_sec)
+                    int batt_mv, int batt_pct, int remaining_sec, int total_sec,
+                    int lux)
 {
     uint8_t *fb = gui.framebuffer();
 
     Paint_NewImage(fb, EPD_WIDTH, EPD_HEIGHT, ROTATE_270, WHITE);
     Paint_Clear(WHITE);
 
-    draw_status_bar(batt_mv, batt_pct, remaining_sec, total_sec);
+    draw_status_bar(batt_mv, batt_pct, remaining_sec, total_sec, lux);
+
+    // Reserved height of the bottom "press to exit" bar (drawn last). Declared here
+    // so the QR sizing below leaves room for it.
+    const int bar_h = 20;
 
     // Body: QR (left, in a fixed-width box so the right column stays put), and
     // the heading / prompt / code (right).
@@ -193,7 +224,7 @@ void qr_screen_draw(GUI &gui, const char *code, const char *url,
         const int quiet = 4;                 // standard QR quiet zone (modules)
         const int cells = n + 2 * quiet;
         const int avail_w = kQrBox - kMargin;
-        const int avail_h = kCanvasH - body_y - 2;
+        const int avail_h = kCanvasH - bar_h - body_y - 2;   // leave room for the exit bar
         int scale = (avail_w < avail_h ? avail_w : avail_h) / cells;
         if (scale < 2) {
             scale = 2;
@@ -225,6 +256,17 @@ void qr_screen_draw(GUI &gui, const char *code, const char *url,
     char idline[24];
     snprintf(idline, sizeof(idline), "Badge ID: %s", code ? code : "");
     Paint_DrawString_P(rx, ry + 8, idline, &PoppinsMd16, WHITE, BLACK);
+
+    // Firmware git hash, small/unobtrusive under the badge id (diagnostic).
+    Paint_DrawString_EN(rx, ry + 8 + 20, kFwVersion, &Font8, WHITE, BLACK);
+
+    // Bottom bar: an inverted strip with the exit instruction, consistent with the
+    // Connected / Mesh Gateway config screens.
+    const int by0 = kCanvasH - bar_h;
+    fill_rect(0, by0, kCanvasW - 1, kCanvasH - 1);
+    const char *exit_lbl = "Press the button to exit";
+    const int ew = Paint_StringWidth_P(exit_lbl, &PoppinsMd16);
+    Paint_DrawString_P((kCanvasW - ew) / 2, by0 + 2, exit_lbl, &PoppinsMd16, BLACK, WHITE);
 }
 
 // Blit a 2-bit grayscale source (4 px/byte, MSB-first, row-major, level 0=black..
@@ -524,7 +566,8 @@ static void draw_bt_badge(int cx, int cy, int r)
 }
 
 void config_screen_connected(GUI &gui, const char *name, const char *table,
-                             int batt_mv, int batt_pct, bool app_alive, bool blink)
+                             int batt_mv, int batt_pct, bool app_alive, bool blink,
+                             int lux)
 {
     uint8_t *fb = gui.framebuffer();
 
@@ -541,6 +584,9 @@ void config_screen_connected(GUI &gui, const char *name, const char *table,
         snprintf(pc, sizeof(pc), "-- %%");
     }
     Paint_DrawString_P(icon_end + 3, 1, pc, &PoppinsMd16, WHITE, BLACK);
+
+    // Lux (center).
+    draw_lux_label(lux);
 
     // Keepalive dot (top-right): pulses solid/hollow each second while the app's
     // keepalive writes keep arriving; stays hollow (no pulse) if stale.
@@ -615,7 +661,7 @@ static void draw_gateway_symbol(int cx, int cy, int r)
 }
 
 void config_screen_gateway(GUI &gui, int batt_mv, int batt_pct,
-                           bool app_alive, bool blink)
+                           bool app_alive, bool blink, int lux)
 {
     uint8_t *fb = gui.framebuffer();
 
@@ -633,6 +679,9 @@ void config_screen_gateway(GUI &gui, int batt_mv, int batt_pct,
         snprintf(pc, sizeof(pc), "-- %%");
     }
     Paint_DrawString_P(icon_end + 3, 1, pc, &PoppinsMd16, WHITE, BLACK);
+
+    // Lux (center).
+    draw_lux_label(lux);
 
     const int dx1 = kCanvasW - kMargin;
     const int dx0 = dx1 - 8;
@@ -679,4 +728,46 @@ void config_screen_gateway(GUI &gui, int batt_mv, int batt_pct,
     const int ew = Paint_StringWidth_P(exit_lbl, &PoppinsMd16);
     Paint_DrawString_P((kCanvasW - ew) / 2, by0 + 4, exit_lbl,
                        &PoppinsMd16, BLACK, WHITE);
+}
+
+void config_screen_ota(GUI &gui, int pct)
+{
+    if (pct < 0) {
+        pct = 0;
+    } else if (pct > 100) {
+        pct = 100;
+    }
+
+    uint8_t *fb = gui.framebuffer();
+    Paint_NewImage(fb, EPD_WIDTH, EPD_HEIGHT, ROTATE_270, WHITE);
+    Paint_Clear(WHITE);
+
+    // Heading.
+    Paint_DrawString_P(kMargin, 30, "Updating firmware", &PoppinsSB24, WHITE, BLACK);
+
+    // Wide progress bar, centered, in the middle of the panel.
+    const int bx0 = kMargin;
+    const int bx1 = kCanvasW - kMargin;
+    const int by0 = 84;
+    const int by1 = 110;          // 26px tall outline
+    draw_rect(bx0, by0, bx1, by1);
+    const int inner_w = (bx1 - bx0) - 3;   // inset by 2px each side, inclusive
+    const int fw = inner_w * pct / 100;
+    if (fw > 0) {
+        fill_rect(bx0 + 2, by0 + 2, bx0 + 2 + fw - 1, by1 - 2);
+    }
+
+    // Numeric percentage, centered under the bar.
+    char pc[8];
+    snprintf(pc, sizeof(pc), "%d%%", pct);
+    const int pw = Paint_StringWidth_P(pc, &PoppinsMd20);
+    Paint_DrawString_P((kCanvasW - pw) / 2, by1 + 8, pc, &PoppinsMd20, WHITE, BLACK);
+
+    // Bottom bar: the "do not power off" warning, inverted so it's unmissable.
+    const int bar_h = 24;
+    const int wy0 = kCanvasH - bar_h;
+    fill_rect(0, wy0, kCanvasW - 1, kCanvasH - 1);
+    const char *warn = "Do not power off";
+    const int ww = Paint_StringWidth_P(warn, &PoppinsMd16);
+    Paint_DrawString_P((kCanvasW - ww) / 2, wy0 + 4, warn, &PoppinsMd16, BLACK, WHITE);
 }

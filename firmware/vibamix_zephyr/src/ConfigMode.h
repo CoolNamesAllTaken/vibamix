@@ -55,6 +55,17 @@ extern "C" {
 
 // Hook for the user-button ISR to request exiting config mode.
 void config_mode_on_button(void);
+// Request exiting config mode from a non-button source (e.g. the SET_CONFIG_MODE
+// mesh opcode). No-op if config mode isn't currently running. Same effect as the
+// button-exit path.
+void config_mode_request_exit(void);
+// Provided by main.cpp: true once the user has held the button long enough to force
+// deep sleep. ConfigMode polls this to abandon its window so main() can power off.
+bool app_force_sleep_requested(void);
+// Provided by main.cpp: request entering config mode from a non-button source (the
+// SET_CONFIG_MODE mesh opcode). Best-effort — only consumed while the badge is awake
+// (run_awake_window); a System OFF badge's radio is down and never sees the opcode.
+void app_request_config_mode(void);
 // Mesh-RX hooks (run on the BT thread): keep an awake badge awake. `on_content`
 // also marks the screen as taken over so the countdown stops repainting.
 void config_mode_on_heartbeat(void);

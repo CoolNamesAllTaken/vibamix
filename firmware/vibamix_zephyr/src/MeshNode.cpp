@@ -115,6 +115,23 @@ static void cb_display_screen(uint8_t kind, uint8_t idx)
     config_mode_on_content();
 }
 
+static void cb_set_brightness(uint8_t level)
+{
+    if (s_self) { s_self->on_set_brightness(level); }
+    config_mode_on_heartbeat();   // LEDs only — keep awake, no screen takeover
+}
+
+static void cb_set_config_mode(uint8_t on)
+{
+    if (s_self) { s_self->on_set_config_mode(on); }
+}
+
+static void cb_release_brightness(void)
+{
+    if (s_self) { s_self->on_release_brightness(); }
+    config_mode_on_heartbeat();   // LEDs only — keep awake, no screen takeover
+}
+
 } // extern "C"
 
 static const struct mesh_config_handlers s_handlers = {
@@ -122,6 +139,9 @@ static const struct mesh_config_handlers s_handlers = {
     .show_led  = cb_show_led,
     .show_text = cb_show_text,
     .display_screen = cb_display_screen,
+    .set_brightness = cb_set_brightness,
+    .release_brightness = cb_release_brightness,
+    .set_config_mode = cb_set_config_mode,
 };
 
 int MeshNode::init(GUI *gui, LEDStrip *leds)
@@ -223,6 +243,35 @@ void MeshNode::apply_persisted_config()
     redraw_identity();
 }
 
+void MeshNode::radio_suspend()
+{
+    // Park the mesh network first (stop scanning / relay / Secure Network Beacon TX),
+    // then disable the controller so MPSL releases the radio + clocks. Without this the
+    // radio keeps cycling and sys_poweroff() can't reach true System OFF.
+    int err = bt_mesh_suspend();
+    if (err && err != -EALREADY) {
+        printk("bt_mesh_suspend failed (%d)\n", err);
+    }
+    err = bt_disable();
+    if (err) {
+        printk("bt_disable failed (%d)\n", err);
+    }
+}
+
+void MeshNode::radio_resume()
+{
+    // Mirror init()'s order: bring the controller back up, then resume mesh activity.
+    int err = bt_enable(nullptr);
+    if (err) {
+        printk("bt_enable (resume) failed (%d)\n", err);
+        return;
+    }
+    err = bt_mesh_resume();
+    if (err && err != -EALREADY) {
+        printk("bt_mesh_resume failed (%d)\n", err);
+    }
+}
+
 void MeshNode::redraw_identity(bool sleeping)
 {
     if (!m_gui) {
@@ -311,6 +360,49 @@ void MeshNode::on_show_led(uint8_t anim, uint8_t r, uint8_t g, uint8_t b)
     }
     if (gateway_status_active()) {
         gateway_status_note(GW_CMD_LED);
+    }
+}
+
+void MeshNode::on_set_brightness(uint8_t level)
+{
+    // Mesh broadcast: pin LED brightness on every badge for the current LED state,
+    // overriding the ALS auto-adjust. Cleared by the next LED state change.
+    if (m_leds) {
+        m_leds->set_brightness_override(level);
+    }
+    if (gateway_status_active()) {
+        gateway_status_note(GW_CMD_BRIGHTNESS);
+    }
+}
+
+void MeshNode::on_release_brightness()
+{
+    // Mesh broadcast: hand LED brightness back to the ALS auto-adjust on every badge
+    // without disturbing the current animation/color.
+    if (m_leds) {
+        m_leds->clear_brightness_override();
+    }
+    if (gateway_status_active()) {
+        gateway_status_note(GW_CMD_BRIGHTNESS);
+    }
+}
+
+void MeshNode::on_set_config_mode(uint8_t on)
+{
+    // A gateway badge re-originates the broadcast to the fleet and receives it back
+    // via mesh loopback. Don't act on it locally — that would kick the operator out
+    // of (or churn) their own config-mode session. Just note the relay for stats.
+    if (gateway_status_active()) {
+        gateway_status_note(GW_CMD_CONFIG);
+        return;
+    }
+    if (on) {
+        // Best-effort: only takes effect while the badge is awake (run_awake_window
+        // consumes this). A System OFF badge's radio is off and never sees it.
+        app_request_config_mode();
+    } else {
+        // No-op unless currently in config mode (reuses the button-exit path).
+        config_mode_request_exit();
     }
 }
 

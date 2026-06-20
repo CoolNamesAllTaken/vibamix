@@ -54,6 +54,22 @@ async def scan(timeout: float = 8.0) -> list[Found]:
     return sorted(out.values(), key=lambda f: f.name)
 
 
+async def scan_all(timeout: float = 4.0) -> dict[str, Found]:
+    """Scan the FULL window (no early return) and return {address: Found} for every
+    vibamix badge seen — used to refresh live BLEDevice handles before opening many
+    connections at once."""
+    out: dict[str, Found] = {}
+
+    def cb(dev, adv):
+        f = _match(dev, adv)
+        if f is not None:
+            out[f.address] = f
+
+    async with BleakScanner(detection_callback=cb):
+        await asyncio.sleep(timeout)
+    return out
+
+
 class Scanner:
     """Continuous background scan. Calls `on_update(addr, name, rssi, is_proxy,
     device)` for every advertisement from a vibamix badge until stopped — feeds a
@@ -137,15 +153,18 @@ class BadgeLink:
         except Exception:
             return 23
 
-    async def connect(self, target, on_disconnect=None) -> None:
+    async def connect(self, target, on_disconnect=None, rescan: bool = True) -> None:
         # On macOS you must connect by a live BLEDevice, not a bare address — a
         # stale/address-only handle raises BleakDeviceNotFoundError. Re-resolve a
         # fresh handle right before connecting; fall back to the scanned one.
+        # `rescan=False` skips the per-call scan (use when handles were refreshed
+        # once up front) — important when opening many links at once, since one
+        # BleakScanner per link is unreliable on macOS.
         if isinstance(target, Found):
             address, device = target.address, target.device
         else:
             address, device = str(target), getattr(target, "device", None)
-        fresh = await BleakScanner.find_device_by_address(address, timeout=8.0)
+        fresh = await BleakScanner.find_device_by_address(address, timeout=8.0) if rescan else None
         dev = fresh or device
         if dev is None:
             raise BleakDeviceNotFoundError(address, f"Device {address} is not advertising")
@@ -268,7 +287,7 @@ class BadgeLink:
     # -- text frame (f0de0004) --
     async def write_text_frame(self, idx: int, anim: int, r: int, g: int, b: int,
                                title: str, body: str, on_progress=None) -> None:
-        h = title.encode("utf-8")[:47]
+        h = title.encode("utf-8")[:60]
         bb = body.encode("utf-8")
         await self._w(keys.UUID_TEXT_FRAME,
                       bytes([keys.GOP_START, idx, anim, r, g, b, len(h)]) + h)

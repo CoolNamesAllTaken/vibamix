@@ -25,6 +25,8 @@ enum gateway_cmd {
 	GW_CMD_DISPLAY,
 	GW_CMD_ATTENDEE,
 	GW_CMD_FRAMELED,
+	GW_CMD_BRIGHTNESS,
+	GW_CMD_CONFIG,
 };
 
 void gateway_status_set_active(bool on);   /* connected gateway: enable the overlay */

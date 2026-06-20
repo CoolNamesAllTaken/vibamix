@@ -15,23 +15,33 @@
  * as `remaining_sec` falls to 0 of `total_sec`; below a divider, the QR encoding
  * `url` on the left and the heading / prompt / big `code` on the right.
  *
- * batt_mv < 0 renders the battery as unknown ("--").
+ * batt_mv < 0 renders the battery as unknown ("--"). `lux` is the ambient-light
+ * reading shown centered in the status bar; lux < 0 renders it as "-- lx".
  */
 void qr_screen_draw(GUI &gui, const char *code, const char *url,
-                    int batt_mv, int batt_pct, int remaining_sec, int total_sec);
+                    int batt_mv, int batt_pct, int remaining_sec, int total_sec,
+                    int lux);
 
 /* "Connected" screen shown while a phone is connected over the config GATT
  * service: status bar (battery + "Connected" + a keepalive dot) and the attendee
  * name / table. The dot pulses solid/hollow each call while `app_alive` (the
  * laptop's keepalive writes are still arriving); it stays hollow when stale. */
 void config_screen_connected(GUI &gui, const char *name, const char *table,
-                             int batt_mv, int batt_pct, bool app_alive, bool blink);
+                             int batt_mv, int batt_pct, bool app_alive, bool blink,
+                             int lux);
 
 /* "Mesh Gateway" screen — shown once this badge has relayed >=1 command to the fleet
  * (gateway_status_count() > 0). A broadcast/mesh symbol, a "Mesh Gateway" label, and
  * live stats (relayed count, last command, time active, target) + the keepalive dot. */
 void config_screen_gateway(GUI &gui, int batt_mv, int batt_pct,
-                           bool app_alive, bool blink);
+                           bool app_alive, bool blink, int lux);
+
+/* OTA progress screen — shown while a firmware image streams in over the config
+ * GATT service. A "Updating firmware" heading, a "Do not power off" warning, and a
+ * wide progress bar (with a numeric NN% label) that fills as `pct` (0..100) climbs.
+ * Drawn into the framebuffer like the other config screens; the caller picks the
+ * refresh (full base map for the first frame, partial for each advance). */
+void config_screen_ota(GUI &gui, int pct);
 
 /* Identity frame (the badge's resting home screen): an optional identity image
  * (2-bit grayscale, authored on the 264x176 landscape canvas) filling the main

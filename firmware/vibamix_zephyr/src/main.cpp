@@ -10,6 +10,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/hwinfo.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/poweroff.h>
 #include <zephyr/sys/printk.h>
 
@@ -17,6 +18,7 @@
 #include "GUI.h"
 #include "MeshNode.h"
 #include "LEDStrip.h"
+#include "ambient_light_sensor.h"
 #include "app_config.h"
 #include "event_status.h"
 #include "qr_screen.h"
@@ -34,6 +36,19 @@ static constexpr int kBarFullRefreshEvery = 30;
 
 // Ignore button edges closer together than this (contact debounce).
 static constexpr uint32_t kBtnDebounceMs = 80;
+
+// Hold the button this long (continuously) to force the badge into deep sleep from
+// any awake state; polled at this cadence by s_longpress_timer.
+static constexpr uint32_t kForceSleepHoldMs = 5000;
+static constexpr uint32_t kLongPressPollMs  = 100;
+
+// When a debugger has enabled halting debug, a true System OFF can't be cleanly
+// reset/halted over SWD, making "reset device" slow/unpredictable. Set this to 1
+// to keep the badge awake (fake sleep) under a debugger instead of powering off.
+// Default 0: always enter real System OFF.
+#ifndef VIBAMIX_FAKE_SLEEP_UNDER_DEBUGGER
+#define VIBAMIX_FAKE_SLEEP_UNDER_DEBUGGER 0
+#endif
 
 static const struct gpio_dt_spec user_led = GPIO_DT_SPEC_GET(DT_ALIAS(user_led), gpios);
 static const struct gpio_dt_spec user_btn = GPIO_DT_SPEC_GET(DT_ALIAS(user_button), gpios);
@@ -69,6 +84,51 @@ static void button_pressed(const struct device *dev, struct gpio_callback *cb, u
 	config_mode_on_button();   // exit signal if already in config mode
 }
 
+// Set once the user has held the button for kForceSleepHoldMs; the awake-window and
+// config-mode loops poll this and bail out to enter_deep_sleep(). Reset on the next
+// boot (a System OFF wake is a full reboot).
+static atomic_t s_force_sleep = ATOMIC_INIT(0);
+
+extern "C" bool app_force_sleep_requested(void)
+{
+	return atomic_get(&s_force_sleep) != 0;
+}
+
+// Set by the SET_CONFIG_MODE mesh opcode (on the BT thread) to request entering
+// config mode; consumed by run_awake_window() on the main thread, so it only takes
+// effect while the badge is awake. Mirrors the s_btn_event "enter config" signal.
+static atomic_t s_enter_config = ATOMIC_INIT(0);
+
+extern "C" void app_request_config_mode(void)
+{
+	atomic_set(&s_enter_config, 1);
+}
+
+// Poll the button level; once it has been held continuously for kForceSleepHoldMs,
+// latch the force-sleep flag, light the user LED as a "hold registered" cue (it's
+// turned off again by gpio_lowpower_for_sleep() when the badge actually powers down),
+// and nudge config mode to exit. ISR context: only register reads/writes + an atomic.
+static void longpress_poll_fn(struct k_timer *t)
+{
+	ARG_UNUSED(t);
+	static uint32_t held_ms;
+
+	if (gpio_is_ready_dt(&user_btn) && gpio_pin_get_dt(&user_btn) == 1) {
+		held_ms += kLongPressPollMs;
+		if (held_ms >= kForceSleepHoldMs && !atomic_get(&s_force_sleep)) {
+			printk("Button held %u ms - forcing deep sleep\n", held_ms);
+			atomic_set(&s_force_sleep, 1);
+			if (gpio_is_ready_dt(&user_led)) {
+				gpio_pin_set_dt(&user_led, 1);   // active-low -> LED on
+			}
+			config_mode_on_button();             // break ConfigMode's loop if active
+		}
+	} else {
+		held_ms = 0;   // released (or a bounce) -> restart the hold count
+	}
+}
+static K_TIMER_DEFINE(s_longpress_timer, longpress_poll_fn, NULL);
+
 // Block until the button is released (logical inactive) or a timeout, so we
 // never arm an edge/level interrupt — or enter System OFF — with it still held.
 static void wait_button_release(void)
@@ -92,6 +152,7 @@ static bool woke_from_button(void)
 	return (cause & RESET_LOW_POWER_WAKE) != 0;
 }
 
+#if VIBAMIX_FAKE_SLEEP_UNDER_DEBUGGER
 // True if an SWD debugger has enabled halting debug (C_DEBUGEN). We skip System
 // OFF in that case: a powered-down core can't be cleanly reset/halted, which
 // makes "reset device" in the debugger slow and unpredictable.
@@ -99,6 +160,7 @@ static inline bool debugger_attached(void)
 {
 	return (DCB->DHCSR & DCB_DHCSR_C_DEBUGEN_Msk) != 0;
 }
+#endif
 
 // The bootloader arms wdt31 (only) when chain-loading an unconfirmed trial image
 // and leaves it running across the jump. We feed it directly via the HAL (the
@@ -161,6 +223,10 @@ static void enter_deep_sleep(void)
 {
 	printk("Entering deep sleep\n");
 
+	// Stop the long-press poll timer so it isn't reading the button between the
+	// System-OFF wake arming and sys_poweroff() below.
+	k_timer_stop(&s_longpress_timer);
+
 	// 1. LEDs off, unconditionally — cuts the WS2812 power gate even if the strip
 	//    failed to init (that path leaves the gate driven active otherwise).
 	s_leds.off();
@@ -180,8 +246,10 @@ static void enter_deep_sleep(void)
 		gpio_pin_interrupt_configure_dt(&user_btn, GPIO_INT_LEVEL_ACTIVE);
 	}
 
-	// 5. Deep sleep. The ePaper keeps its image with no power. Wake by a button
-	//    press (RESET_LOW_POWER_WAKE) or a reset.
+	// 5. Deep sleep. The ePaper keeps its image with no power. System OFF powers the
+	//    radio + peripherals down in hardware (no bt_disable() needed). Wake by a
+	//    button press (RESET_LOW_POWER_WAKE) or a reset — a full reboot that re-runs
+	//    main()/MeshNode::init() to bring BT/mesh back up.
 	sys_poweroff();
 }
 
@@ -194,10 +262,17 @@ static void enter_deep_sleep(void)
 // apply_persisted_config / redraw_identity).
 static bool run_awake_window(void)
 {
+	// A 5 s hold already latched force-sleep (e.g. while exiting config mode) — go
+	// straight to deep sleep without opening the window or waiting on the held button.
+	if (atomic_get(&s_force_sleep)) {
+		return false;
+	}
+
 	// Drop a still-held / already-latched press (e.g. the one that just exited config
 	// mode) so the window doesn't close the instant it opens.
 	wait_button_release();
 	s_btn_event = false;
+	atomic_clear(&s_enter_config);   // drop any stale mesh enter-config request
 
 	const struct app_config *cfg = app_config_get();
 	const char *id_name  = cfg->name;
@@ -234,7 +309,8 @@ static bool run_awake_window(void)
 	// left it asleep after its full-refresh baseline draw).
 	s_gui.wake();
 
-	while ((now = k_uptime_get()) < deadline && !s_btn_event)
+	while ((now = k_uptime_get()) < deadline && !s_btn_event &&
+	       !atomic_get(&s_force_sleep) && !atomic_get(&s_enter_config))
 	{
 		if (event_status_consume_heartbeat())
 		{
@@ -294,6 +370,17 @@ static bool run_awake_window(void)
 	// after the last drain, so a stale mesh frame can't render once config mode or
 	// deep-sleep owns the panel.
 	s_mesh.set_defer_renders(false);
+
+	// A forced sleep (5 s hold) must go to deep sleep, not be treated as a press that
+	// re-enters config mode.
+	if (atomic_get(&s_force_sleep)) {
+		return false;
+	}
+	// A SET_CONFIG_MODE(on) mesh opcode re-enters config mode, same as a button press.
+	if (atomic_get(&s_enter_config)) {
+		atomic_clear(&s_enter_config);
+		return true;
+	}
 	return s_btn_event;
 }
 
@@ -313,11 +400,22 @@ int main(void)
 		gpio_pin_configure_dt(&rf_sw_ctl, GPIO_OUTPUT_ACTIVE);
 	}
 
-	bool config_mode = woke_from_button();
+	// Always wake into the identity frame, whether from a cold boot or a System OFF
+	// button wake. A button press during the awake window then promotes into config
+	// mode (run_awake_window() returns true). Still clear the sticky reset cause so
+	// the next boot reads clean.
+	(void)woke_from_button();
+	bool config_mode = false;
 
 	// Bring the LED strip up first so the boot animation is independent of the
 	// ePaper/mesh. A strip failure is non-fatal — we still deep-sleep below.
 	const bool leds_ok = (s_leds.init() == 0);
+
+	// Start the ambient-light-sensor monitor AFTER the LED strip powers its rail:
+	// the LTR-329 shares that gate, so the monitor must not poll I2C before it's up
+	// (and stays quiet whenever the rail is off). It reads continuously while the
+	// LEDs are lit and pulse-samples in config mode (see ambient_light_sensor.cpp).
+	ambient_light_sensor_start(&s_leds);
 
 	s_gui.init();
 
@@ -333,6 +431,10 @@ int main(void)
 		gpio_pin_interrupt_configure_dt(&user_btn, GPIO_INT_EDGE_TO_ACTIVE);
 		gpio_init_callback(&btn_cb_data, button_pressed, BIT(user_btn.pin));
 		gpio_add_callback(user_btn.port, &btn_cb_data);
+
+		// Watch for a 5 s hold to force deep sleep from any awake state.
+		k_timer_start(&s_longpress_timer, K_MSEC(kLongPressPollMs),
+			      K_MSEC(kLongPressPollMs));
 	}
 
 	// Bring up the mesh node (BT + mesh stack, self-provision, GATT proxy, and
@@ -372,8 +474,19 @@ int main(void)
 			{
 				s_leds.off();   // keep it dark during config; battery-friendly
 			}
+			// LEDs (and the shared light-sensor rail) are dark now — have the ALS
+			// briefly pulse the rail for config-screen lux instead of polling a dead bus.
+			ambient_light_sensor_set_config_mode(true);
 			s_config.run(&s_gui, &s_mesh, &user_btn);
+			// Stop pulsing and wait for the rail to be released before we re-take it.
+			ambient_light_sensor_set_config_mode(false);
 			config_mode = false;
+
+			// A 5 s hold ended config mode -> go straight to deep sleep, skipping the
+			// identity restore + countdown.
+			if (atomic_get(&s_force_sleep)) {
+				break;
+			}
 
 			// Config left the QR / a pushed image on the panel — restore the identity
 			// frame (and its LED) so the countdown window rests on it.
@@ -391,6 +504,7 @@ int main(void)
 			continue;
 		}
 
+#if VIBAMIX_FAKE_SLEEP_UNDER_DEBUGGER
 		// Timed out with no event. Under a debugger we can't cleanly enter System OFF
 		// (a powered-down core can't be reset/halted), so wait for the next button
 		// press to re-enter config instead of sleeping.
@@ -402,15 +516,22 @@ int main(void)
 			// awake-window animation keeps running and it never looks asleep.
 			s_leds.off();
 			s_mesh.redraw_identity(/*sleeping=*/true);
+			// Mirror real sleep: go radio-quiet while idling so this simulated sleep
+			// matches the production power profile (no scanner/relay/beacon spikes).
+			s_mesh.radio_suspend();
 			wait_button_release();
 			s_btn_event = false;
 			while (!s_btn_event)
 			{
 				k_sleep(K_MSEC(50));
 			}
+			// Exit from (fake) deep sleep: bring BT/mesh back up before config mode,
+			// which needs the BLE advertiser + GATT service.
+			s_mesh.radio_resume();
 			config_mode = true;
 			continue;
 		}
+#endif
 
 		break;
 	}

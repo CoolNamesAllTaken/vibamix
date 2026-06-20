@@ -3,6 +3,7 @@
 #include "MeshNode.h"
 #include "app_config.h"
 #include "badge_store.h"
+#include "ambient_light_sensor.h"
 #include "battery.h"
 #include "config_gatt.h"
 #include "gateway_status.h"
@@ -29,7 +30,7 @@
 #define VIBAMIX_CONFIG_QR_PREFIX "vibamix://connect?name=vibamix-"
 
 // How long to stay awake with no activity before powering off.
-static constexpr int64_t kConfigWindowMs = 180 * 1000;
+static constexpr int64_t kConfigWindowMs = 600 * 1000;
 
 // How often to do a full refresh (clears partial-refresh ghosting), in countdown ticks.
 static constexpr int kFullRefreshEvery = 30;
@@ -75,6 +76,15 @@ static atomic_t           s_image_pending;
 static atomic_t           s_display_pending;
 static uint8_t            s_pd_kind, s_pd_idx;
 
+// Deferred OTA progress. The f0de0009 DATA writes land on the BT thread once per
+// chunk; cb_ota_progress just records the running byte counts (32-bit atomics are
+// torn-free on the M33) and sets a flag, and the main loop redraws the progress bar
+// — only when the integer percentage changes, so the slow ePaper refresh runs at
+// most ~100 times across the whole transfer regardless of chunk count.
+static atomic_t           s_ota_progress_pending;
+static atomic_t           s_ota_written;
+static atomic_t           s_ota_total;
+
 // Dedicated fast connectable advertiser, run only during config mode so a laptop
 // or phone finds the badge instantly. The mesh proxy's own advertising is slow
 // (~1.9 s Network-ID) and carries the name only in its scan response; this advert
@@ -105,14 +115,27 @@ static void start_fast_adv(void)
             printk("config: fast adv create failed\n");
             s_adv_give_up = true;
         } else {
-            const char *name = bt_get_name();
+            // Build the scan-response name locally from the config code instead of
+            // bt_get_name(): it is guaranteed short and null-terminated, so the legacy
+            // scan response always fits. bt_get_name() has been observed returning an
+            // over-long (unterminated) buffer here, which made bt_le_ext_adv_set_data
+            // fail with "adv or scan rsp data too large" and left the badge silent.
+            char code[5];
+            app_identity_code(code);
+            char advname[20];
+            int nlen = snprintf(advname, sizeof(advname), "vibamix-%s", code);
+            if (nlen < 0) {
+                nlen = 0;
+            } else if (nlen > (int)sizeof(advname) - 1) {
+                nlen = sizeof(advname) - 1;   // snprintf truncated — clamp to what fits
+            }
             struct bt_data ad[] = {
                 BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR),
                 BT_DATA_BYTES(BT_DATA_UUID128_ALL,
                     BT_UUID_128_ENCODE(0xf0de0001, 0x4b1c, 0x4e2a, 0x9a11, 0xa1b2c3d4e5f6)),
             };
             struct bt_data sd[] = {
-                BT_DATA(BT_DATA_NAME_COMPLETE, name, strlen(name)),
+                BT_DATA(BT_DATA_NAME_COMPLETE, advname, nlen),
             };
             if (bt_le_ext_adv_set_data(s_adv, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd)) != 0) {
                 printk("config: fast adv set_data failed\n");
@@ -169,6 +192,14 @@ static void cb_ota_start(uint32_t total)
     if (s_self) { s_self->on_ota_start(total); }
 }
 
+static void cb_ota_progress(uint32_t written, uint32_t total)
+{
+    // BT thread: just record the counts; the main loop redraws the bar.
+    atomic_set(&s_ota_written, (atomic_val_t)written);
+    atomic_set(&s_ota_total, (atomic_val_t)total);
+    atomic_set(&s_ota_progress_pending, 1);
+}
+
 static void cb_ota_end(bool ok)
 {
     if (s_self) { s_self->on_ota_end(ok); }
@@ -201,6 +232,12 @@ void config_mode_on_button(void)
     if (s_self) { s_self->request_exit(); }
 }
 
+void config_mode_request_exit(void)
+{
+    // Same effect as the button-exit path; no-op when config mode isn't running.
+    if (s_self) { s_self->request_exit(); }
+}
+
 void config_mode_on_heartbeat(void)
 {
     atomic_set(&s_heartbeat_pending, 1);
@@ -223,6 +260,7 @@ static const struct config_gatt_callbacks s_gatt_cb = {
     .on_frame_led = cb_frame_led,
     .on_mesh_tx   = cb_mesh_tx,
     .on_ota_start = cb_ota_start,
+    .on_ota_progress = cb_ota_progress,
     .on_ota_end   = cb_ota_end,
     .on_keepalive = cb_keepalive,
 };
@@ -333,12 +371,16 @@ void ConfigMode::on_display(uint8_t kind, uint8_t idx)
 
 void ConfigMode::on_ota_start(uint32_t total)
 {
+    ARG_UNUSED(total);
     // Take over the panel so the countdown stops repainting, and warn the user.
+    // Paint the 0% progress frame and establish it as the partial-refresh base; the
+    // main loop then advances the bar in place via refresh_partial as chunks arrive.
     s_content_shown = true;
     note_activity();
     if (m_gui) {
         m_gui->wake();
-        m_gui->show_text("Updating firmware", "Do not power off");
+        config_screen_ota(*m_gui, 0);
+        m_gui->set_base_map();
     }
 }
 
@@ -406,7 +448,11 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
     // Initial full draw + establish the partial-refresh baseline. The panel stays
     // awake (no deep sleep) so the per-second countdown can use partial refresh.
     gui->wake();
-    qr_screen_draw(*gui, code, url, batt_mv, batt_pct, total_sec, total_sec);
+    {
+        struct als_reading als = ambient_light_sensor_get();
+        const int lux = als.valid ? (int)als.lux : -1;
+        qr_screen_draw(*gui, code, url, batt_mv, batt_pct, total_sec, total_sec, lux);
+    }
     gui->set_base_map();
 
     // Bring up the fast connectable advertiser so a laptop finds us quickly.
@@ -439,6 +485,8 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
     bool    ka_blink = false;
     int     ka_tick = 0;
     bool    gw_shown = false;   // last connected-screen variant (false=Connected, true=Mesh Gateway)
+    int     ota_pct_shown = -1; // last OTA progress percentage painted (-1 = none yet)
+    int     ota_tick = 0;       // partial-refresh counter for the OTA bar
     // True once the currently-shown content frame has been (re)established as the
     // partial-refresh base while the panel is awake — so the keepalive dot can be
     // partial-refreshed over it. Invalidated whenever a content frame is rendered
@@ -483,6 +531,25 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
             note_activity();
         }
 
+        // Advance the OTA progress bar (deferred from the BT thread). Redraw only on
+        // an integer-percent change so the ePaper refresh runs at most ~100 times for
+        // the whole image; a periodic full refresh clears partial-refresh ghosting.
+        if (atomic_cas(&s_ota_progress_pending, 1, 0)) {
+            uint32_t w = (uint32_t)atomic_get(&s_ota_written);
+            uint32_t t = (uint32_t)atomic_get(&s_ota_total);
+            int pct = t ? (int)((uint64_t)w * 100 / t) : 0;
+            if (pct != ota_pct_shown) {
+                ota_pct_shown = pct;
+                config_screen_ota(*gui, pct);
+                if (++ota_tick % kFullRefreshEvery == 0) {
+                    gui->set_base_map();
+                } else {
+                    gui->refresh_partial();
+                }
+            }
+            note_activity();
+        }
+
         // A content frame just took over the panel (e.g. a name push, which sets the
         // flag on the BT thread without queuing a deferred render): re-base it before
         // the keepalive dot can be partial-refreshed over it.
@@ -508,9 +575,13 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
             gateway_status_set_active(true);       // relayed mesh commands now overlay
             gw_shown = false;                      // count==0 at connect -> Connected screen
             gui->wake();
-            config_screen_connected(*gui, cfg->name,
-                                    cfg->has_attendee ? cfg->attendee_id : "",
-                                    batt_mv, batt_pct, true, false);
+            {
+                struct als_reading als = ambient_light_sensor_get();
+                const int lux = als.valid ? (int)als.lux : -1;
+                config_screen_connected(*gui, cfg->name,
+                                        cfg->has_attendee ? cfg->attendee_id : "",
+                                        batt_mv, batt_pct, true, false, lux);
+            }
             gui->set_base_map();
             last_shown = -1;
         } else if (!connected && phase == PHASE_CONNECTED) {
@@ -523,6 +594,12 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
         }
 
         if (s_exit) {
+            break;
+        }
+        // A 5 s button hold forces sleep regardless of connection state; bail so
+        // main() routes straight to deep sleep. (The hold's initial press may have
+        // had its s_exit cleared by the entry wait-for-release, so check directly.)
+        if (app_force_sleep_requested()) {
             break;
         }
         if (!connected && (k_uptime_get() - s_last_activity) >= kConfigWindowMs) {
@@ -545,12 +622,14 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
                     // Once this badge has relayed >=1 command to the fleet it's a mesh
                     // gateway -> dedicated screen; otherwise the plain Connected screen.
                     const bool gw = gateway_status_count() > 0;
+                    struct als_reading als = ambient_light_sensor_get();
+                    const int lux = als.valid ? (int)als.lux : -1;
                     if (gw) {
-                        config_screen_gateway(*gui, batt_mv, batt_pct, app_alive, ka_blink);
+                        config_screen_gateway(*gui, batt_mv, batt_pct, app_alive, ka_blink, lux);
                     } else {
                         config_screen_connected(*gui, cfg->name,
                                                 cfg->has_attendee ? cfg->attendee_id : "",
-                                                batt_mv, batt_pct, app_alive, ka_blink);
+                                                batt_mv, batt_pct, app_alive, ka_blink, lux);
                     }
                     if (gw != gw_shown) {
                         // Layout changed (Connected <-> Gateway): full refresh so the
@@ -598,7 +677,9 @@ void ConfigMode::run(GUI *gui, MeshNode *mesh, const struct gpio_dt_spec *btn)
                 last_shown = remaining;
                 // Only the QR phase repaints here — a disconnect exits the loop, so
                 // phase is always PHASE_QR while disconnected.
-                qr_screen_draw(*gui, code, url, batt_mv, batt_pct, remaining, total_sec);
+                struct als_reading als = ambient_light_sensor_get();
+                const int lux = als.valid ? (int)als.lux : -1;
+                qr_screen_draw(*gui, code, url, batt_mv, batt_pct, remaining, total_sec, lux);
                 if (++tick % kFullRefreshEvery == 0) {
                     gui->set_base_map();   // periodic full refresh to clear ghosting
                 } else {

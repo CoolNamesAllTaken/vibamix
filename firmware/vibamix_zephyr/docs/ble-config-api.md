@@ -15,7 +15,7 @@ It is a complete handoff spec — you should not need the firmware source to imp
 
 - The badge spends most of its life powered off. **The attendee presses the button** on the badge;
   it wakes into **config mode**, shows a unique 4‑character **code** and a **QR code**, and becomes
-  connectable for ~3 minutes (the window resets on activity).
+  connectable for ~10 minutes (the window resets on activity).
 - The QR encodes a **native‑app deep link**: `vibamix://connect?name=vibamix-<CODE>`
   (e.g. `vibamix://connect?name=vibamix-1A2F`). Scanning it opens the **vibamix configuration app**,
   which connects to the badge by its advertised BLE name **`vibamix-<CODE>`**. The same `<CODE>` is
@@ -299,7 +299,7 @@ black/white (e.g. luminance < 128 → black) → `packFramebuffer`.
 
 ## 7. Text frames (stored content)
 
-The badge stores **20 text frames**, indexed `0…19`, each a **header** (≤ 47 bytes), a **body**
+The badge stores **20 text frames**, indexed `0…19`, each a **header** (≤ 60 bytes), a **body**
 (≤ 1023 bytes, word‑wrapped on the badge), and a per‑frame **LED**. They persist across power cycles.
 Set one with a framed stream to the **Text frame** characteristic (`f0de0004`):
 
@@ -555,9 +555,12 @@ Vendor opcodes (company ID `0x0059`, 3‑byte `0x_C0_<b0>_<cid>`):
 | `0x04` / `0x05` / `0x06` | IMG START / DATA / END | `le16 size,w,h` / `le16 off,bytes` / `le32 crc32` | Flood a **render‑only** 1‑bit image (best‑effort; a dropped segment fails the frame). |
 | `0x07` | HEARTBEAT | optional UTF‑8 event name (≤ 8 B) | Keep‑awake beat (below). |
 | `0x08` / `0x09` | SHOW_TEXT hdr / body | header / `seq,last,body` | Draw an **ephemeral** text frame (not stored). |
+| `0x0B` | SET_BRIGHTNESS | `u8 level` | Override LED brightness (0–255) on every badge, overriding the ambient‑light auto‑adjust, for the **current LED state only**. Any later LED state change (SET_LED / new frame) resumes auto‑brightness. Live, not stored. |
+| `0x0C` | SET_CONFIG_MODE | `u8 on` | Enter (`1`) / exit (`0`) config mode on every badge. **Best‑effort: only reaches badges that are currently awake** — a System OFF badge's radio is down and never sees it (press its button instead). The originating gateway badge ignores it (so the operator isn't kicked out of its own session). |
+| `0x0D` | RELEASE_BRIGHTNESS | (none) | Release a `SET_BRIGHTNESS` override on every badge — brightness resumes the ambient‑light auto‑adjust **without** changing the running animation/color. Pairs with `0x0B`. |
 
 > Removed opcodes (now GATT‑only): `0x01` set‑name, `0x02` set‑fun‑fact, `0x0A` display‑stored,
-> `0x0B` set‑attendee, `0x0C` set‑frame‑LED.
+> set‑attendee, set‑frame‑LED. (`0x0B`/`0x0C` are now reused for brightness / config‑mode above.)
 
 **Laptop / phone as a mesh gateway.** A host with no mesh radio injects these by writing a complete
 vendor‑model access payload (the 3‑byte opcode + params) to the **Mesh‑TX** characteristic
@@ -590,7 +593,7 @@ occasional dropped flood is harmless.
   connection‑liveness ping) — there is no per‑write status, so the app cannot read back whether a
   CRC passed. Treat a completed write sequence as "sent," and tell the user to confirm the badge
   screen updated. (To read back what's *stored*, use the SELECT→READ_AT flow in §9.4.)
-- **Config window times out.** The badge stays awake ~3 minutes, refreshed on each
+- **Config window times out.** The badge stays awake ~10 minutes, refreshed on each
   write/connection event. A long idle gap (e.g. the user wandering off mid‑draw) can let it sleep;
   if a write fails, prompt the user to press the button and reconnect.
 - **Name vs quick image ordering.** Writing the identity `META` (name/ID/LED) redraws the identity

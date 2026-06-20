@@ -29,7 +29,7 @@ extern "C" {
 
 /* Stored text screens: a header + a full-screen body, addressed by index. */
 #define APP_CFG_SCREEN_COUNT 20
-#define APP_CFG_HEADER_MAX   48
+#define APP_CFG_HEADER_MAX   61
 #define APP_CFG_BODY_MAX     1024
 /* Image frames (must match BADGE_IMAGE_SLOTS in badge_store.h). */
 #define APP_CFG_IMAGE_SLOTS  4

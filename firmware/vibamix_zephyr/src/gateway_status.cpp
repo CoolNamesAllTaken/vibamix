@@ -29,6 +29,8 @@ static const char *label_for(int cmd)
 	case GW_CMD_DISPLAY:  return "Display screen";
 	case GW_CMD_ATTENDEE: return "Table ID";
 	case GW_CMD_FRAMELED: return "Frame LED";
+	case GW_CMD_BRIGHTNESS: return "Brightness";
+	case GW_CMD_CONFIG:   return "Config mode";
 	default:              return "";
 	}
 }

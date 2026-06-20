@@ -38,6 +38,15 @@ struct mesh_config_handlers {
 	/* Show an already-stored frame on every badge (no content transferred):
 	 * kind 0 = text screen idx, 1 = image slot idx, 2 = identity (idx ignored). */
 	void (*display_screen)(uint8_t kind, uint8_t idx);
+	/* Override LED brightness on every badge for the current LED state (not stored);
+	 * any later LED state change resumes ALS auto-adjust. */
+	void (*set_brightness)(uint8_t level);
+	/* Release a brightness override without changing the animation/color: brightness
+	 * resumes ALS auto-adjusting. Pairs with set_brightness. */
+	void (*release_brightness)(void);
+	/* Enter (on=1) or exit (on=0) config mode. Best-effort: only reaches badges
+	 * that are currently awake — a System OFF badge's radio is powered down. */
+	void (*set_config_mode)(uint8_t on);
 };
 
 /* Register the C++ side callbacks. Pass a pointer with static lifetime. */

@@ -37,6 +37,11 @@ void ota_confirm_on_boot(void);
 /* The slot the host should target (the inactive one): 0 = A, 1 = B. */
 uint8_t ota_inactive_slot(void);
 
+/* Transfer progress (for a UI progress bar): bytes accepted so far, and the
+ * total announced at ota_begin(). Both 0 when no transfer is active. */
+uint32_t ota_written(void);
+uint32_t ota_total(void);
+
 #ifdef __cplusplus
 }
 #endif

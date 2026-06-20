@@ -169,7 +169,12 @@
 	pinctrl-0 = <&i2c20_default>;
 	pinctrl-1 = <&i2c20_sleep>;
 	pinctrl-names = "default", "sleep";
-	/* add sensor child node here once you know the I2C address and compatible */
+
+	als: ltr329als@29 {
+		compatible = "pants-for-birds,ltr329als";
+		reg = <0x29>;
+		status = "okay";
+	};
 };
 
 &lfxo {

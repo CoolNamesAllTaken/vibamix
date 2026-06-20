@@ -1,4 +1,5 @@
 #include "LEDStrip.h"
+#include "ambient_light_sensor.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
@@ -7,8 +8,30 @@
 #include <errno.h>
 #include <math.h>
 
-// ~25% brightness cap — easy on the eyes and lower current across 4 LEDs.
-static constexpr uint8_t kBrightness = 64;
+// ALS auto-brightness mapping. Lux is gain-corrected illuminance: below kLuxDim
+// the room is dark -> floor brightness; at/above kLuxBright -> the cap; linear in
+// between. Higher ambient light -> brighter LEDs (so they stay visible), darker
+// room -> gentler glow. The applied brightness eases toward the target by
+// kBrightSlewStep per ~40 ms frame, so it never flickers or steps abruptly.
+static constexpr uint32_t kLuxDim        = 10;    // <=10 lux: dim room / night -> floor
+static constexpr uint32_t kLuxBright     = 400;   // >=400 lux: bright indoor -> cap
+static constexpr uint8_t  kBrightMin     = 64;    // gentle floor in the dark
+static constexpr uint8_t  kBrightSlewStep = 2;    // max brightness change per frame
+static constexpr uint32_t kAlsPollFrames = 25;    // refresh target ~1 Hz (25 frames @ 40 ms)
+
+// Map gain-corrected lux to a target applied brightness in [kBrightMin, kBrightnessCap].
+static uint8_t lux_to_brightness(uint32_t lux)
+{
+    if (lux <= kLuxDim) {
+        return kBrightMin;
+    }
+    if (lux >= kLuxBright) {
+        return LEDStrip::kBrightnessCap;
+    }
+    const uint32_t span_lux = kLuxBright - kLuxDim;
+    const uint32_t span_bri = LEDStrip::kBrightnessCap - kBrightMin;
+    return (uint8_t)(kBrightMin + (lux - kLuxDim) * span_bri / span_lux);
+}
 
 // Rainbow pattern: hue degrees rotated per frame.
 static constexpr uint16_t kRotationStep = 4;
@@ -31,6 +54,19 @@ static constexpr float kCometTail = 1.8f;            // tail length, in LED unit
 static constexpr uint8_t  kSparkDecay = 10;
 static constexpr uint8_t  kSparkFloor = 12;
 
+// Rainbow-sparkle "crackle": white sparks over a rotating rainbow. Tuned to look
+// like a real sparkler — many short-lived sparks igniting at once, each blinking a
+// few times as it fades (vs. the gentle single-decay Sparkle pattern above).
+// - kCrackleDecay: large -> short spark lifetime (snappy, not a slow ramp).
+// - kCrackleSpawnNum: per-pixel ignition attempts per frame (several can light).
+// - kCrackleSpawnMask: ignite when (rand & mask)==0 -> ~1/(mask+1) chance per attempt.
+// - kCrackleFlickerKeep: min fraction (/255) of a spark's level that always shows;
+//   the rest is gated by a fast per-pixel random flicker so live sparks blink.
+static constexpr uint8_t  kCrackleDecay       = 60;
+static constexpr uint8_t  kCrackleSpawnNum    = 2;
+static constexpr uint32_t kCrackleSpawnMask   = 0x3;   // ~1/4 chance per attempt
+static constexpr uint16_t kCrackleFlickerKeep = 80;    // of 255
+
 // Render thread: draws the active pattern at kFrameMs independent of the main /
 // ePaper loop, so a (blocking) panel refresh can't stall the animation.
 K_THREAD_STACK_DEFINE(s_led_stack, 768);
@@ -38,7 +74,8 @@ static struct k_thread s_led_thread;
 
 static const struct device *const s_strip = DEVICE_DT_GET(STRIP_NODE);
 
-// Scale an (already brightness-capped) color by lvl/255.
+// Scale a color by lvl/255 (lvl folds in both the per-pattern level and the
+// current applied brightness).
 static struct led_rgb scale_rgb(struct led_rgb c, uint8_t lvl)
 {
     struct led_rgb o{};
@@ -88,6 +125,7 @@ int LEDStrip::init()
     // Drive rendering from a dedicated, steady-cadence thread so the ePaper's
     // (blocking) refreshes on the main thread don't freeze the animation.
     m_powered = true;
+    m_render_enabled = true;
     k_thread_create(&s_led_thread, s_led_stack, K_THREAD_STACK_SIZEOF(s_led_stack),
                     LEDStrip::thread_entry, this, NULL, NULL,
                     K_PRIO_PREEMPT(10), 0, K_NO_WAIT);
@@ -107,15 +145,46 @@ void LEDStrip::thread_entry(void *a, void *b, void *c)
 void LEDStrip::render_loop()
 {
     for (;;) {
-        if (m_powered) {
+        if (m_powered && m_render_enabled) {
+            update_brightness();
             render();
         }
         k_sleep(K_MSEC(kFrameMs));
     }
 }
 
+void LEDStrip::update_brightness()
+{
+    // A manual override holds m_brightness fixed for the current LED state — skip
+    // the ALS poll + slew entirely until the next state change clears the override.
+    if (m_bright_override) {
+        return;
+    }
+
+    // Refresh the target ~1 Hz from the latest ALS reading. On an invalid reading
+    // (sensor absent / error / pre-first-sample) hold the previous target — which
+    // defaults to the cap — so the strip never goes dark on a sensor fault.
+    if (m_tick % kAlsPollFrames == 0) {
+        struct als_reading r = ambient_light_sensor_get();
+        if (r.valid) {
+            m_bright_target = lux_to_brightness(r.lux);
+        }
+    }
+
+    // Slew one step toward the target so brightness eases instead of jumping.
+    if (m_brightness < m_bright_target) {
+        const uint8_t d = m_bright_target - m_brightness;
+        m_brightness += (d < kBrightSlewStep) ? d : kBrightSlewStep;
+    } else if (m_brightness > m_bright_target) {
+        const uint8_t d = m_brightness - m_bright_target;
+        m_brightness -= (d < kBrightSlewStep) ? d : kBrightSlewStep;
+    }
+}
+
 void LEDStrip::set_pattern(LedPattern pattern)
 {
+    // New LED state -> drop any manual brightness override; resume ALS auto-adjust.
+    m_bright_override = false;
     m_pattern = pattern;
 }
 
@@ -126,12 +195,31 @@ void LEDStrip::set_color(uint8_t r, uint8_t g, uint8_t b)
 
 void LEDStrip::set_anim(LedPattern pattern, uint8_t r, uint8_t g, uint8_t b)
 {
-    // Scale to the same brightness cap the animations use (~25%) to keep current
-    // and glare down across the 4-LED chain.
-    m_color.r = (uint16_t)r * kBrightness / 255;
-    m_color.g = (uint16_t)g * kBrightness / 255;
-    m_color.b = (uint16_t)b * kBrightness / 255;
+    // New LED state -> drop any manual brightness override; resume ALS auto-adjust.
+    // (set_color() delegates here, so it's covered too.)
+    m_bright_override = false;
+    // Store the RAW color; the current brightness (capped, ALS-driven) is applied
+    // at render time so a later brightness change affects an already-set color.
+    m_color.r = r;
+    m_color.g = g;
+    m_color.b = b;
     m_pattern = pattern;
+}
+
+void LEDStrip::set_brightness_override(uint8_t level)
+{
+    // Hold this brightness for the current LED state; update_brightness() will skip
+    // the ALS slew until a set_pattern/set_color/set_anim clears the override.
+    m_brightness = level;
+    m_bright_override = true;
+}
+
+void LEDStrip::clear_brightness_override()
+{
+    // Hand brightness back to the ALS auto-adjust without disturbing the current
+    // pattern/color. update_brightness() resumes on the next frame and slews
+    // m_brightness toward the ambient-derived target.
+    m_bright_override = false;
 }
 
 uint32_t LEDStrip::rand_next()
@@ -154,6 +242,7 @@ LedPattern led_pattern_from_code(uint8_t code)
     case (uint8_t)LedPattern::Breathe: return LedPattern::Breathe;
     case (uint8_t)LedPattern::Comet:   return LedPattern::Comet;
     case (uint8_t)LedPattern::Sparkle: return LedPattern::Sparkle;
+    case (uint8_t)LedPattern::RainbowSparkle: return LedPattern::RainbowSparkle;
     default:                           return LedPattern::Solid;
     }
 }
@@ -167,6 +256,7 @@ void LEDStrip::render()
     case LedPattern::Breathe: render_breathe(); break;
     case LedPattern::Comet:   render_comet();   break;
     case LedPattern::Sparkle: render_sparkle(); break;
+    case LedPattern::RainbowSparkle: render_rainbow_sparkle(); break;
     case LedPattern::Off:
     default:                  render_off();     break;
     }
@@ -179,6 +269,23 @@ void LEDStrip::power_on()
     // a prior off() (which cut it). The render thread resumes lighting the chain.
     gpio_pin_configure_dt(&s_power, GPIO_OUTPUT_ACTIVE);
     m_powered = true;
+    m_render_enabled = true;
+}
+
+void LEDStrip::power_on_dark()
+{
+    // Power the rail (which also feeds the shared LTR-329 light sensor) but keep the
+    // chain dark for an ambient-light pulse in config mode. Keep the render thread
+    // DISABLED (m_render_enabled stays false) so it can't commit to the WS2812 SPI bus
+    // while this caller (the ALS thread) does — only one committer at a time. Clock
+    // black once here to close the power-up flash window.
+    m_render_enabled = false;
+    m_pattern = LedPattern::Off;
+    gpio_pin_configure_dt(&s_power, GPIO_OUTPUT_ACTIVE);
+    m_powered = true;
+    if (device_is_ready(s_strip)) {
+        render_off();   // commit black now (render thread is disabled, so no SPI race)
+    }
 }
 
 void LEDStrip::off()
@@ -192,6 +299,7 @@ void LEDStrip::off()
     // that case, but ALWAYS float the gate — init() drives it active before the strip-ready
     // check, so this is the one operation that must run to leave the rail off before sleep.
     m_powered = false;
+    m_render_enabled = false;
     m_pattern = LedPattern::Off;
     if (device_is_ready(s_strip)) {
         render_off();
@@ -209,8 +317,9 @@ void LEDStrip::render_off()
 
 void LEDStrip::render_solid()
 {
+    const struct led_rgb px = scale_rgb(m_color, m_brightness);
     for (size_t i = 0; i < STRIP_NUM_PIXELS; i++) {
-        m_pixels[i] = m_color;
+        m_pixels[i] = px;
     }
     commit();
 }
@@ -221,7 +330,7 @@ void LEDStrip::render_rainbow()
     constexpr uint16_t spread = 360 / STRIP_NUM_PIXELS;
     for (size_t i = 0; i < STRIP_NUM_PIXELS; i++) {
         uint16_t hue = (phase + i * spread) % 360;
-        m_pixels[i] = hsv_to_rgb(hue, kBrightness);
+        m_pixels[i] = hsv_to_rgb(hue, m_brightness);
     }
     commit();
 }
@@ -248,7 +357,7 @@ void LEDStrip::render_wheel()
         if (factor < kBlobFloor) {
             factor = kBlobFloor;
         }
-        const uint8_t val = (uint8_t)(kBrightness * factor);
+        const uint8_t val = (uint8_t)(m_brightness * factor);
         m_pixels[i] = hsv_to_rgb(hue, val);
     }
     commit();
@@ -262,7 +371,8 @@ void LEDStrip::render_breathe()
     const uint32_t tri  = (c < half) ? c : (kBreathePeriod - c);  // 0..half
     const uint8_t lvl = (uint8_t)(kBreatheFloor +
                                   (uint32_t)(255 - kBreatheFloor) * tri / half);
-    const struct led_rgb px = scale_rgb(m_color, lvl);
+    const uint8_t b8 = (uint8_t)((uint16_t)lvl * m_brightness / 255);
+    const struct led_rgb px = scale_rgb(m_color, b8);
     for (size_t i = 0; i < STRIP_NUM_PIXELS; i++) {
         m_pixels[i] = px;
     }
@@ -285,7 +395,7 @@ void LEDStrip::render_comet()
         if (factor < 0.0f) {
             factor = 0.0f;
         }
-        m_pixels[i] = scale_rgb(m_color, (uint8_t)(factor * 255.0f));
+        m_pixels[i] = scale_rgb(m_color, (uint8_t)(factor * (float)m_brightness));
     }
     commit();
 }
@@ -300,8 +410,49 @@ void LEDStrip::render_sparkle()
         m_level[rand_next() % STRIP_NUM_PIXELS] = 255;
     }
     for (size_t i = 0; i < STRIP_NUM_PIXELS; i++) {
-        const uint8_t lvl = m_level[i] > kSparkFloor ? m_level[i] : kSparkFloor;
+        const uint8_t raw_lvl = m_level[i] > kSparkFloor ? m_level[i] : kSparkFloor;
+        const uint8_t lvl = (uint8_t)((uint16_t)raw_lvl * m_brightness / 255);
         m_pixels[i] = scale_rgb(m_color, lvl);
+    }
+    commit();
+}
+
+void LEDStrip::render_rainbow_sparkle()
+{
+    // Rotating rainbow base (as in render_rainbow) overlaid with crackling white
+    // sparks. Each spark ignites to full, then blinks a few times as it fades fast.
+    const uint16_t phase = (uint16_t)((m_tick * kRotationStep) % 360);
+    constexpr uint16_t spread = 360 / STRIP_NUM_PIXELS;
+
+    // Crackle update: fast decay so sparks are short-lived, then aggressively ignite
+    // pixels (several attempts/frame) so many sparks crackle at once.
+    for (size_t i = 0; i < STRIP_NUM_PIXELS; i++) {
+        m_level[i] = (m_level[i] > kCrackleDecay) ? (uint8_t)(m_level[i] - kCrackleDecay) : 0;
+    }
+    for (uint8_t s = 0; s < kCrackleSpawnNum; s++) {
+        if ((rand_next() & kCrackleSpawnMask) == 0) {
+            m_level[rand_next() % STRIP_NUM_PIXELS] = 255;
+        }
+    }
+
+    for (size_t i = 0; i < STRIP_NUM_PIXELS; i++) {
+        const uint16_t hue = (phase + i * spread) % 360;
+        struct led_rgb base = hsv_to_rgb(hue, m_brightness);
+
+        // Fast per-pixel flicker: a fraction of the level always shows, the rest is
+        // gated by a random value each frame so a live spark snaps bright/dark -> the
+        // "blink a few times" crackle. intensity is 0..255 of how white this pixel is.
+        const uint16_t flick = kCrackleFlickerKeep +
+                               (uint16_t)(rand_next() & 0xFF) * (255 - kCrackleFlickerKeep) / 255;
+        const uint8_t intensity = (uint8_t)((uint16_t)m_level[i] * flick / 255);
+
+        // Lerp each channel toward the white target (m_brightness) by intensity/255.
+        const uint8_t w = m_brightness;
+        struct led_rgb px{};
+        px.r = (uint8_t)(base.r + ((int16_t)w - base.r) * intensity / 255);
+        px.g = (uint8_t)(base.g + ((int16_t)w - base.g) * intensity / 255);
+        px.b = (uint8_t)(base.b + ((int16_t)w - base.b) * intensity / 255);
+        m_pixels[i] = px;
     }
     commit();
 }

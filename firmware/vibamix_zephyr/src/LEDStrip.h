@@ -20,6 +20,7 @@ enum class LedPattern : uint8_t {
     Breathe = 4,  // chosen color eased up/down in brightness (~2.5 s)
     Comet   = 5,  // chosen-color dot runs across with a fading tail, wrapping
     Sparkle = 6,  // chosen-color twinkles over a dim floor
+    RainbowSparkle = 7,  // rotating rainbow with crackling bright white sparks (color ignored)
 };
 
 // Clamp an on-wire animation code to a valid LedPattern (unknown -> Solid).
@@ -30,6 +31,11 @@ public:
     // Frame period of the animation loop (~25 fps). Exposed so the caller that
     // drives render() ticks at the same cadence the animations assume.
     static constexpr uint32_t kFrameMs = 40;
+
+    // Brightness cap (~25%): the max applied brightness, and the default held
+    // until the first valid ambient-light reading. With no ALS present the strip
+    // stays at this value, so behavior matches the old fixed-brightness firmware.
+    static constexpr uint8_t kBrightnessCap = 255;
 
     // Enables the strip's power gate, checks the device is ready, and starts the
     // dedicated render thread (steady ~25 fps, independent of the ePaper/main loop).
@@ -48,19 +54,44 @@ public:
     // Used to apply a frame's per-frame LED config when it's displayed.
     void set_anim(LedPattern pattern, uint8_t r, uint8_t g, uint8_t b);
 
+    // Force the applied brightness to `level`, overriding the ALS auto-adjust for
+    // the duration of the CURRENT LED state. Any later state change (set_pattern /
+    // set_color / set_anim) clears the override and brightness resumes auto-adjusting.
+    // Live, not stored — e.g. from the SET_BRIGHTNESS mesh opcode.
+    void set_brightness_override(uint8_t level);
+
+    // Release a brightness override (set by set_brightness_override) WITHOUT changing
+    // the current animation/color: brightness resumes ALS auto-adjusting, easing back
+    // to the ambient-derived target. No-op if no override is active. Counterpart to
+    // set_brightness_override — e.g. from the RELEASE_BRIGHTNESS mesh opcode.
+    void clear_brightness_override();
+
     // Re-assert the WS2812 power gate (PMOS on) after a prior off(), e.g. when
     // config mode wants to light a frame's LED again. init() also does this. The
     // render thread resumes driving the strip while powered.
     void power_on();
 
+    // Power the rail but keep the chain DARK: force the Off pattern and immediately
+    // clock black so the WS2812s don't show power-up garbage. Used to momentarily
+    // power the shared LED/light-sensor rail for an ambient-light reading in config
+    // mode (where the LEDs are otherwise off) without a visible flash.
+    void power_on_dark();
+
     // Blank the chain and cut the WS2812 power gate (PMOS off), e.g. before
     // deep sleep so the strip draws no current. The render thread idles while off.
     void off();
+
+    // True while the WS2812/light-sensor power rail is on. The LTR-329 shares this
+    // gate, so the ALS monitor must only read I2C while this is true.
+    bool powered() const { return m_powered; }
 
 private:
     // Render thread: draws the active pattern every kFrameMs while powered.
     static void thread_entry(void *a, void *b, void *c);
     void render_loop();
+    // Poll the ALS (~1 Hz) for a target brightness and slew m_brightness one step
+    // toward it; called once per frame by render_loop while powered.
+    void update_brightness();
     // Draw one frame of the active pattern and advance its animation clock.
     void render();
     void render_off();
@@ -70,16 +101,22 @@ private:
     void render_breathe();
     void render_comet();
     void render_sparkle();
+    void render_rainbow_sparkle();
     void commit();
     uint32_t rand_next();
 
     struct led_rgb m_pixels[STRIP_NUM_PIXELS];
-    struct led_rgb m_color{};
+    struct led_rgb m_color{};   // RAW (unscaled) base color; brightness applied at render time
+    uint8_t        m_brightness{kBrightnessCap};     // applied brightness, slewed toward target
+    uint8_t        m_bright_target{kBrightnessCap};  // ALS-derived goal; cap until first valid read
+    volatile bool  m_bright_override{false};         // hold m_brightness, skip ALS slew (current state only)
     LedPattern     m_pattern{LedPattern::Wheel};
     uint32_t       m_tick{0};   // free-running animation frame counter
     uint8_t        m_level[STRIP_NUM_PIXELS]{};  // per-pixel fade state (sparkle)
     uint32_t       m_rng{0x1234abcdu};           // xorshift PRNG state (sparkle)
-    volatile bool  m_powered{false};             // strip gate on -> render thread commits
+    volatile bool  m_powered{false};             // power rail (WS2812 + light sensor) on
+    volatile bool  m_render_enabled{false};      // render thread may commit (off during a
+                                                 // sensor pulse so it can't fight the SPI bus)
 };
 
 #endif /* VIBAMIX_LED_STRIP_H */

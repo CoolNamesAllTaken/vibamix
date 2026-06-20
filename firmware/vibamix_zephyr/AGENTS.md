@@ -76,9 +76,10 @@ API has C++ linkage (no `extern "C"` in `GUI_Paint.h`).
 App source:
 
 - [main.cpp](src/main.cpp) — inits LEDs + GUI, brings up the mesh node (`MeshNode::init`), then
-  **branches on the wake cause**: a button wake from System OFF runs **config mode**
-  ([ConfigMode](src/ConfigMode.cpp)); a cold boot shows the identity screen, plays the LED intro,
-  and applies persisted config. The cold-boot awake window is **heartbeat-aware "mesh mode"**: while
+  shows the identity screen, plays the LED intro, and applies persisted config. Both a cold boot
+  and a System OFF **button wake** start here on the identity frame; a **button press during the
+  awake window** then promotes into **config mode** ([ConfigMode](src/ConfigMode.cpp)) — so config
+  mode takes a *second* press after a button wake. The awake window is **heartbeat-aware "mesh mode"**: while
   1 Hz event heartbeats arrive it stays awake (each resets a 60 s deadline) and paints the
   [event_status](src/event_status.cpp) bottom countdown bar via partial refresh, resting on a clean
   frame before sleep. With no event it falls through after ~5 s as before. Both paths end in
@@ -154,9 +155,10 @@ Company ID `CONFIG_BT_COMPANY_ID` (Nordic `0x0059` for the prototype), vendor mo
 [mesh_model.c](src/mesh_model.c):
 
 The mesh surface is deliberately **small and ephemeral** — only live LED, render-only image,
-heartbeat, and draw-only text. **All stored content** (name, table id, the 20 text frames, the 4
-image slots, per-frame LED, display selection) is **GATT-only** now (the `0x01/0x02/0x0A/0x0B/0x0C`
-opcodes that used to set those over mesh were removed).
+heartbeat, draw-only text, brightness override, and a config-mode toggle. **All stored content**
+(name, table id, the 20 text frames, the 4 image slots, per-frame LED, display selection) is
+**GATT-only** now (the `0x01/0x02` set-name/fun-fact opcodes that used to set those over mesh were
+removed; `0x0B/0x0C` are reused below for brightness / config-mode).
 
 | Opcode | Name | Payload |
 |--------|------|---------|
@@ -167,6 +169,9 @@ opcodes that used to set those over mesh were removed).
 | `0x07` | `HEARTBEAT` | optional UTF-8 event name (≤8 B, kept unsegmented) — sent at 1 Hz; keeps an awake badge awake (resets config window) **and** drives the mesh-mode bottom countdown bar ([event_status.cpp](src/event_status.cpp)) |
 | `0x08` | `SHOW_TEXT_HDR` | header bytes (starts an **ephemeral, not stored** text draw) |
 | `0x09` | `SHOW_TEXT_BODY` | `u8 seq, u8 last`, body bytes (chunked) |
+| `0x0B` | `SET_BRIGHTNESS` | `u8 level` — override LED brightness (0–255), beating the ALS auto-adjust, for the **current LED state only**; any later LED state change resumes auto-brightness. Live, not stored. ([LEDStrip::set_brightness_override](src/LEDStrip.cpp)) |
+| `0x0C` | `SET_CONFIG_MODE` | `u8 on` — enter (1) / exit (0) config mode. **Best-effort: awake badges only** (a System OFF radio is down — press the button instead); consumed by `run_awake_window` ([main.cpp](src/main.cpp)). The originating gateway badge ignores it so the operator isn't kicked out of its own session. |
+| `0x0D` | `RELEASE_BRIGHTNESS` | (no payload) — release a `0x0B` override and resume ALS auto-brightness **without** changing the running animation/color. Pairs with `0x0B`. ([LEDStrip::clear_brightness_override](src/LEDStrip.cpp)) |
 
 A host with no mesh radio injects these by writing the full access payload (3-byte opcode + params)
 to the **`f0de000C` mesh-TX gateway** char of a config-mode badge, which re-originates it to the
@@ -201,10 +206,13 @@ A second, **direct** path (independent of the mesh) lets an attendee configure t
 badge from a phone. The badge normally sleeps in **System OFF** ~5 s after each wake
 ([main.cpp](src/main.cpp), `sys_poweroff()`), with the user button armed as the wake source.
 
-- **Wake-cause branch** ([main.cpp](src/main.cpp)): `woke_from_button()` reads
-  `hwinfo_get_reset_cause()`; on nRF54L a System-OFF GPIO wake is `RESET_LOW_POWER_WAKE` (cold
-  boot is `RESET_POR`/`RESET_PIN`). It clears the cause (RESETREAS is sticky). Button-wake →
-  **config mode**; otherwise the normal boot→5 s LEDs→sleep path.
+- **Wake / config entry** ([main.cpp](src/main.cpp)): every wake (cold boot *or* a System OFF
+  button wake) starts on the **identity frame** and runs the awake window; **config mode** is
+  entered by a **button press during that window** (or a mesh `SET_CONFIG_MODE` request).
+  `woke_from_button()` still reads
+  `hwinfo_get_reset_cause()` and clears the cause (RESETREAS is sticky) — on nRF54L a System-OFF
+  GPIO wake is `RESET_LOW_POWER_WAKE`, a cold boot is `RESET_POR`/`RESET_PIN` — but its result no
+  longer selects config mode; both wake causes take the same identity-first path.
 - **Config screen** ([qr_screen.cpp](src/qr_screen.cpp)): renders a **QR** (vendored qrcodegen,
   version pinned ≤5) encoding the native-app deep link `vibamix://connect?name=vibamix-<CODE>` plus
   the human `<CODE>` — a 4-hex code from the same FICR id as the mesh unicast address
@@ -239,7 +247,7 @@ badge from a phone. The badge normally sleeps in **System OFF** ~5 s after each 
   below its need). Image/screen renders triggered from a BT-thread callback are **deferred to the main
   loop** (lock-free ping-pong buffers) so the ~2 s ePaper refresh never blocks the BT thread and drops
   the connection.
-- **Window/exit** ([ConfigMode.cpp](src/ConfigMode.cpp)): stays awake 180 s, reset on any
+- **Window/exit** ([ConfigMode.cpp](src/ConfigMode.cpp)): stays awake 600 s, reset on any
   connection/write activity. Config mode exits on a **second button press** *or* on a **GATT
   disconnect** after having been connected; on exit it tears down cleanly (LEDs off, stop the
   advertiser, disconnect any link), then `main()` restores the home identity frame and runs the

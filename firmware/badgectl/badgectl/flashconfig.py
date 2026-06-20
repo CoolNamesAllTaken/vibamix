@@ -19,6 +19,14 @@ FLASH_TIMEOUT_S: int = 120
 # Flash all attached probes in parallel; one worker per probe.
 MAX_CONCURRENT: int = 20
 
+# Per-probe retry: 20 CMSIS-DAP probes attaching on one hub at the same instant
+# produces transient probe-rs attach/comm failures. Retry the whole flash a few
+# times (idempotent — assign_for is keyed by serial, download only erases written
+# sectors), and stagger worker starts so they don't all hit the bus at once.
+FLASH_MAX_ATTEMPTS: int = 3
+FLASH_RETRY_BACKOFF_S: float = 2.0   # sleep backoff_s * attempt + jitter between tries
+STAGGER_STEP_S: float = 0.3          # worker N waits N * step before its first attempt
+
 # --- default firmware artifacts ----------------------------------------------
 # Resolved relative to the repo so the Flash tab pre-fills the paths that
 # ``vibamix_zephyr/scripts/build_slots.sh`` produces. The operator builds first

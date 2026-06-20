@@ -15,11 +15,13 @@ from dataclasses import dataclass
 from . import flashconfig
 
 # Each device line from `probe-rs list` looks like:
-#   [0]: XIAO nRF54L15 -- 2886:0066:ABCDEF0123 (CMSIS-DAP)
-# Capture the vid:pid[:serial] selector token and the human name before "--".
+#   [0]: Seeed Studio XIAO nrf54 CMSIS-DAP -- 2886:0066-1:65256195 (CMSIS-DAP)
+# The `-1` after the pid is a display-only HID-interface index (absent on some
+# probes/versions); we skip it and key on vid:pid:serial. Capture the human name
+# before "--".
 _LINE_RE = re.compile(
     r"^\s*\[\d+\]:\s*(?P<name>.*?)\s*--\s*"
-    r"(?P<vid>[0-9a-fA-F]{4}):(?P<pid>[0-9a-fA-F]{4})(?::(?P<serial>[^\s()]+))?",
+    r"(?P<vid>[0-9a-fA-F]{4}):(?P<pid>[0-9a-fA-F]{4})(?:-\d+)?(?::(?P<serial>[^\s()]+))?",
 )
 
 

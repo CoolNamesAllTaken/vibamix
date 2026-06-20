@@ -32,6 +32,52 @@
                 "thbreak main",
                 "continue"
             ]
+        },
+        {
+            // Same load/reset flow as "Debug vibamix", but over a SEGGER J-Link
+            // instead of the XIAO's on-board probe-rs/CMSIS-DAP. Connects to an
+            // already-running J-Link GDB server on localhost:2331 — start it first
+            // with scripts/open_nrf54l15_jlink.bash (NRF54L15_M33 / SWD / 4 MHz).
+            //
+            // CRITICAL: the breakpoint at main MUST be a HARDWARE breakpoint
+            // (`hbreak`), not `tbreak`/`thbreak`. J-Link realizes a software/flash
+            // breakpoint by rewriting the slot-A image in RRAM, which changes the
+            // bytes the first-stage bootloader CRC-verifies — the BL then rejects
+            // slot A and never jumps to it, so the core never reaches main and the
+            // CPU stays running ("CPU is not halted"). A hardware (FPB) breakpoint
+            // doesn't touch memory, so the CRC stays valid and the BL launches the
+            // slot. (probe-rs sets thbreak as a real HW breakpoint, which is why
+            // "Debug vibamix" works with thbreak; J-Link does not, hence hbreak.)
+            // J-Link's `monitor reset` resets AND halts at the reset vector.
+            "name": "Debug vibamix (J-Link)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "external",
+            "gdbTarget": "localhost:2331",
+            "executable": "${workspaceFolder}/firmware/vibamix_zephyr/build/slotA/zephyr/zephyr.elf",
+            "showDevDebugOutput": "none",
+            // The app is linked into slot A (0xE000); `load` writes it there. After
+            // `monitor reset` the core sits at the bootloader's reset vector (0x0);
+            // `continue` runs the BL, which sees the attached debugger (C_DEBUGEN)
+            // and jumps to slot A, stopping at the HW breakpoint at `main`.
+            "overrideLaunchCommands": [
+                "set remote hardware-breakpoint-limit 8",
+                "load",
+                "monitor reset",
+                "hbreak main",
+                "continue"
+            ],
+            "overrideRestartCommands": [
+                "monitor reset",
+                "hbreak main",
+                "continue"
+            ],
+            "overrideResetCommands": [
+                "load",
+                "monitor reset",
+                "hbreak main",
+                "continue"
+            ]
         }
     ]
 }
