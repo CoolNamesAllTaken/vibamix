@@ -114,6 +114,19 @@ class DeviceModel(QAbstractTableModel):
             self._index[self._rows[j].address] = j
         self.endRemoveRows()
 
+    def prune_stale(self, max_age: float, protect: set[str] | None = None) -> int:
+        """Remove devices not seen within `max_age` seconds. `protect` addresses are kept
+        regardless (e.g. the active connection, which stops advertising while connected)."""
+        protect = protect or set()
+        now = time.monotonic()
+        stale = [d.address for d in self._rows
+                 if d.address not in protect
+                 and d.last_seen
+                 and now - d.last_seen > max_age]
+        for addr in stale:
+            self.remove(addr)   # reuses existing reindex + beginRemoveRows logic
+        return len(stale)
+
     def device_at(self, row: int) -> Device:
         return self._rows[row]
 

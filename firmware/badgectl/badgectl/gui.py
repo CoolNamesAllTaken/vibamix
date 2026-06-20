@@ -88,6 +88,7 @@ QHeaderView::section { background: #20242c; border: none; padding: 4px; color: #
 """
 
 KA_FRESH_S = 5.0  # link considered alive if any badge activity seen within this many seconds
+STALE_PRUNE_S = 60.0  # drop scanned badges unheard for this long
 
 
 def pil_to_pixmap(pil_img) -> QPixmap:
@@ -367,6 +368,10 @@ class MainWindow(QMainWindow):
 
     def _tick_ui(self) -> None:
         self.model.refresh_ages()
+        if self.scanner.running:
+            protect = {self._active} if self._active else set()
+            if self.model.prune_stale(STALE_PRUNE_S, protect):
+                self.count_lbl.setText(f"{self.model.rowCount()} devices")
         if self._active and self.link.connected:
             now = time.monotonic()
             rx_age = now - self._last_rx                          # true notify age (label)
