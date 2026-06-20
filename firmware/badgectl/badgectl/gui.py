@@ -59,6 +59,12 @@ from .devices import COL_CHECK, COL_NAME, DeviceModel
 from .mesh import MeshCrypto, MeshSession
 from .seqstore import SeqStore
 
+# Bulk (XLSX) programming connects through a small pool of workers; each worker
+# connects to one badge, programs it, disconnects, then moves to the next. This
+# caps simultaneous BLE links (macOS/CoreBluetooth is unreliable with many at
+# once) instead of holding every checked badge open at the same time.
+BULK_WORKERS = 5
+
 STYLE = """
 QWidget { font-size: 13px; }
 QGroupBox {
@@ -1513,19 +1519,6 @@ class MainWindow(QMainWindow):
             await link.write_image_frame(im.slot, im.fmt, im.anim, im.r, im.g, im.b,
                                          self._convert(im.path, im.fmt))
 
-    async def _ka_loop(self, link: BadgeLink, lock: asyncio.Lock) -> None:
-        """Hold a badge's config-mode window open with a 1 Hz keepalive write.
-
-        The lock serializes writes on this link so a keepalive never interleaves
-        with an in-flight chunked upload on the same connection."""
-        while link.connected:
-            try:
-                async with lock:
-                    await link.send_keepalive()
-            except Exception:  # noqa: BLE001
-                break
-            await asyncio.sleep(1.0)
-
     async def _run_bulk(self) -> None:
         if self.link.connected:
             self._log("Disconnect the interactive connection before running a bulk program.")
@@ -1553,81 +1546,72 @@ class MainWindow(QMainWindow):
         self.bulk_prog.setMaximum(n)
         self.bulk_prog.setValue(0)
 
-        # held connections: address -> (BadgeLink, write-lock, keepalive task)
-        links: dict[str, tuple[BadgeLink, asyncio.Lock, asyncio.Task]] = {}
-        finalized: set[str] = set()   # addresses left in a done/failed state
+        # Refresh BLEDevice handles once, up front: a worker connects with
+        # rescan=False (one BleakScanner per connect is unreliable on macOS).
         try:
-            # Phase 1: connect to all checked badges at once and keep them awake.
-            self.bulk_status.setText(f"connecting to {n} badge(s) …")
-            self._log(f"Bulk: opening {n} connection(s) to hold badges awake …")
+            handles = await scan_all(4.0)
+        except Exception as e:  # noqa: BLE001
+            handles = {}
+            self._log(f"Bulk: scan refresh failed ({e}); using last-seen handles.")
+
+        # Each worker pulls (device, row) pairs off this queue, programming one
+        # badge at a time over its own short-lived connection.
+        work: asyncio.Queue = asyncio.Queue()
+        for d, row in zip(targets, rows):
+            work.put_nowait((d, row))
+
+        # All of this runs in one asyncio loop, so the counters need no locking.
+        done = ok = 0
+
+        async def _program_one(d, row) -> bool:
+            nonlocal done
+            self.model.set_status(d.address, "connecting")
+            fresh = handles.get(d.address)
+            found = fresh or Found(name=d.name, address=d.address,
+                                   is_proxy=d.is_proxy, device=d.device)
+            link = BadgeLink()
             try:
-                handles = await scan_all(4.0)   # refresh BLEDevice handles once, up front
+                await link.connect(found, rescan=False)
             except Exception as e:  # noqa: BLE001
-                handles = {}
-                self._log(f"Bulk: scan refresh failed ({e}); using last-seen handles.")
-
-            sem = asyncio.Semaphore(6)   # stagger connects so the adapter isn't swamped
-
-            async def _open(d) -> None:
-                async with sem:
-                    if self._batch_cancel:
-                        return
-                    self.model.set_status(d.address, "connecting")
-                    fresh = handles.get(d.address)
-                    found = fresh or Found(name=d.name, address=d.address,
-                                           is_proxy=d.is_proxy, device=d.device)
-                    link = BadgeLink()
-                    try:
-                        await link.connect(found, rescan=False)
-                    except Exception as e:  # noqa: BLE001
-                        self.model.set_status(d.address, "failed")
-                        self._log(f"bulk connect {d.name}: {e}")
-                        return
-                    lock = asyncio.Lock()
-                    task = asyncio.ensure_future(self._ka_loop(link, lock))
-                    links[d.address] = (link, lock, task)
-                    self.model.set_status(d.address, "connected")
-
-            await asyncio.gather(*(_open(d) for d in targets))
-            self._log(f"Bulk: {len(links)}/{n} connected; programming …")
-
-            # Phase 2: program each badge over its held link (others stay kept-alive).
-            done = ok = 0
-            for d, row in zip(targets, rows):
-                if self._batch_cancel:
-                    break
-                entry = links.get(d.address)
-                if entry is None:
-                    done += 1
-                    self.bulk_prog.setValue(done)
-                    continue   # never connected — already marked failed
-                link, lock, _task = entry
+                self.model.set_status(d.address, "failed")
+                self._log(f"bulk connect {d.name}: {e}")
+                return False
+            try:
                 self.bulk_status.setText(f"{d.name}: programming row {row.row_no} …")
                 self.model.set_status(d.address, "working")
+                await self._program_row(link, row)
+                self.model.set_status(d.address, "done")
+                return True
+            except Exception as e:  # noqa: BLE001
+                self.model.set_status(d.address, "failed")
+                self._log(f"bulk {d.address} (row {row.row_no}): {e}")
+                return False
+            finally:
+                # Disconnect so the badge is released and sleeps promptly.
+                await link.disconnect()
+
+        async def _worker() -> None:
+            nonlocal done, ok
+            while not self._batch_cancel:
                 try:
-                    async with lock:
-                        await self._program_row(link, row)
-                    self.model.set_status(d.address, "done")
-                    ok += 1
-                except Exception as e:  # noqa: BLE001
-                    self.model.set_status(d.address, "failed")
-                    self._log(f"bulk {d.address} (row {row.row_no}): {e}")
-                finalized.add(d.address)
+                    d, row = work.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                succeeded = await _program_one(d, row)
+                ok += 1 if succeeded else 0
                 done += 1
                 self.bulk_prog.setValue(done)
+
+        try:
+            self.bulk_status.setText(f"programming {n} badge(s), "
+                                     f"{BULK_WORKERS} at a time …")
+            self._log(f"Bulk: programming {n} badge(s) with {BULK_WORKERS} workers …")
+            await asyncio.gather(*(_worker() for _ in range(BULK_WORKERS)))
 
             self.bulk_status.setText(f"done: {ok}/{n} ok"
                                      + (" (cancelled)" if self._batch_cancel else ""))
             self._log(f"Bulk program complete: {ok}/{n} ok.")
         finally:
-            # Phase 3: tear down every held connection (badges sleep after disconnect).
-            for _addr, (link, _lock, task) in links.items():
-                task.cancel()
-            await asyncio.gather(*(link.disconnect() for link, _l, _t in links.values()),
-                                 return_exceptions=True)
-            for addr in links:
-                if addr not in finalized:
-                    self.model.set_status(addr, "idle")
             self._batch_running = False
             self.bulk_run.setEnabled(True)
             self.bulk_cancel_btn.setEnabled(False)
