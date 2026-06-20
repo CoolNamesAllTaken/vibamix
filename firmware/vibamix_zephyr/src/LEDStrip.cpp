@@ -15,7 +15,7 @@
 // kBrightSlewStep per ~40 ms frame, so it never flickers or steps abruptly.
 static constexpr uint32_t kLuxDim        = 10;    // <=10 lux: dim room / night -> floor
 static constexpr uint32_t kLuxBright     = 400;   // >=400 lux: bright indoor -> cap
-static constexpr uint8_t  kBrightMin     = 12;    // gentle floor in the dark (~5%)
+static constexpr uint8_t  kBrightMin     = 64;    // gentle floor in the dark
 static constexpr uint8_t  kBrightSlewStep = 2;    // max brightness change per frame
 static constexpr uint32_t kAlsPollFrames = 25;    // refresh target ~1 Hz (25 frames @ 40 ms)
 

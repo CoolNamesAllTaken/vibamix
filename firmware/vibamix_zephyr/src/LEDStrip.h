@@ -34,7 +34,7 @@ public:
     // Brightness cap (~25%): the max applied brightness, and the default held
     // until the first valid ambient-light reading. With no ALS present the strip
     // stays at this value, so behavior matches the old fixed-brightness firmware.
-    static constexpr uint8_t kBrightnessCap = 64;
+    static constexpr uint8_t kBrightnessCap = 255;
 
     // Enables the strip's power gate, checks the device is ready, and starts the
     // dedicated render thread (steady ~25 fps, independent of the ePaper/main loop).
